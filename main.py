@@ -464,9 +464,9 @@ def main():
                         help='enable Grow (RigL) -> ADMM pruning cycles')
     parser.add_argument('--sparsity', type=float, default=0.98, help='global target sparsity (0~1)')
     parser.add_argument('--init-method', type=str, default='random', choices=['erk', 'er', 'random'])
-    parser.add_argument('--num-cycles', type=int, default=2)
+    parser.add_argument('--num-cycles', type=int, default=3)
     parser.add_argument('--grow-interval', type=int, default=5)
-    parser.add_argument('--grow-frac', type=float, default=0.2)
+    parser.add_argument('--grow-frac', type=float, default=0.1)
     parser.add_argument('--grow-grad-steps', type=int, default=50)
 
     args = parser.parse_args()
