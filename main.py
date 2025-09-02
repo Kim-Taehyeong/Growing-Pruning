@@ -188,7 +188,7 @@ def rigl_grow_once(model, masks, grow_frac, grad_buffers):
 
     # pruned 위치의 |grad| 풀링
     scores_all, refs = [], []
-    for name, p in model.named_parameters():
+    for name, p in tqdm(model.named_parameters()):
         if name not in masks:
             continue
         m = masks[name].view(-1).bool()
@@ -215,7 +215,7 @@ def rigl_grow_once(model, masks, grow_frac, grad_buffers):
     chosen = [refs[int(i)] for i in topk_idx.tolist()]
 
     with torch.no_grad():
-        for (name, flat_i) in chosen:
+        for (name, flat_i) in tqdm(chosen):
             mask = masks[name].view(-1)
             if not mask[flat_i]:
                 mask[flat_i] = True
