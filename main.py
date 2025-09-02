@@ -403,7 +403,7 @@ def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_o
     # (0) 초기 희소 모델 생성(ER/ERK)
     densities = None
     if args.init_method == "random":
-        masks = apply_prune_random(model, device, args)
+        masks = apply_prune(model, device, args)
     else:
         masks, densities = initialize_masks(
             model,
