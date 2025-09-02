@@ -24,6 +24,23 @@ def _collect_maskable_params(model):
             named.append((name, p))
     return named
 
+# 온라인 |grad| EMA 누적기
+def online_accumulate_grad_ema(model, grad_ma, beta=0.95, include_bias=False):
+    # grad_ma: dict[name] -> tensor (EMA 상태)
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if p.grad is None or not p.requires_grad:
+                continue
+            if (not include_bias) and name.endswith(".bias"):
+                continue  # conv/linear의 weight 위주로
+
+            g = p.grad.detach().abs()
+            if name not in grad_ma:
+                grad_ma[name] = g.clone()
+            else:
+                # EMA: m = beta*m + (1-beta)*|g|
+                grad_ma[name].mul_(beta).add_(g, alpha=(1.0 - beta))
+
 # ==============================================================
 # ### 파라미터 별 IN/OUT Shape Info 저장
 # ==============================================================
@@ -228,7 +245,7 @@ def rebuild_masks_from_weights(model, device="cpu"):
 # ==============================================================
 # ### ADMM Pruning 사이클 (Interval 크기만큼 Epoch 반복)
 # ==============================================================
-def admm_prune_stage(args, model, device, train_loader, test_loader, masks, optimizer, densities, epochs, cycle):
+def admm_prune_stage(args, model, device, train_loader, test_loader, masks, optimizer, densities, epochs, cycle, grad_buffers):
     Z, U = initialize_Z_and_U(model)
     for epoch in range(epochs):
         print(f'[RigL+ADMM] ADMM epoch {epoch+1}/{epochs}')
@@ -239,6 +256,7 @@ def admm_prune_stage(args, model, device, train_loader, test_loader, masks, opti
             output = model(data)
             loss = admm_loss(args, device, model, Z, U, output, target)
             loss.backward()
+            online_accumulate_grad_ema(model, grad_buffers, beta=0.95)
             mask_grads(model, masks)
             optimizer.step()
             enforce_weight_mask(model, masks)  # pruned=0 유지
@@ -366,6 +384,7 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None):
 # ==============================================================
 def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_optimizer_cls):
     optimizer = base_optimizer_cls(model.named_parameters(), lr=args.lr, eps=args.adam_epsilon)
+    grad_buf = {}
 
     # 사전 학습
     for epoch in range(args.num_pre_epochs):
@@ -377,6 +396,7 @@ def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_o
             output = model(data)
             loss = regularized_nll_loss(args, model, output, target)
             loss.backward()
+            online_accumulate_grad_ema(model, grad_buf, beta=0.95)
             optimizer.step()
         testAndSave(args, model, device, test_loader, "Pretraining", epoch)
 
@@ -395,18 +415,19 @@ def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_o
 
 
     # 사이클 반복
-    for c in tqdm(range(args.num_cycles)):
+    for c in range(args.num_cycles):
         print(f'[RigL+ADMM] Cycle {c+1}/{args.num_cycles}')
 
         # (1) 성장용 |grad| 수집 (업데이트 없이 평균)
-        grad_buf = collect_grad_for_growth(model, device, train_loader, steps=args.grow_grad_steps)
+        # grad_buf = collect_grad_for_growth(model, device, train_loader, steps=args.grow_grad_steps)
 
         # (2) RigL 성장: pruned 중 |grad| 상위 → 활성화(가중치 0으로 초기화)
         masks = rigl_grow_once(model, masks, grow_frac=args.grow_frac, grad_buffers=grad_buf)
-
+        grad_buf = {}
         # (3) ADMM 프루닝 스테이지: 짧게 학습 후 apply_prune로 목표 희소율 달성
         masks = admm_prune_stage(args, model, device, train_loader, test_loader, masks,
-                                 optimizer, densities, epochs=args.grow_interval, cycle=c + 1)
+                                 optimizer, densities, epochs=args.grow_interval, cycle=c + 1,
+                                 grad_buffers=grad_buf)
 
     print('[RigL+ADMM] Final fixed-mask retraining...')
 
@@ -493,25 +514,25 @@ def main():
                            ])),
             batch_size=args.test_batch_size, shuffle=True, **kwargs)
         
-    # elif args.dataset == "imagenet":
-    #     train_tf = transforms.Compose([
-    #         transforms.RandomResizedCrop(224, interpolation=InterpolationMode.BICUBIC),
-    #         transforms.RandomHorizontalFlip(),
-    #         transforms.ToTensor(),
-    #         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    #     ])
-    #     val_tf = transforms.Compose([
-    #         transforms.Resize(256, interpolation=InterpolationMode.BICUBIC),
-    #         transforms.CenterCrop(224),
-    #         transforms.ToTensor(),
-    #         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    #     ])
-    #     train_loader = torch.utils.data.DataLoader(
-    #         datasets.ImageFolder(args.imagenet_train, transform=train_tf),
-    #         batch_size=args.batch_size, shuffle=True, **kwargs)
-    #     test_loader = torch.utils.data.DataLoader(
-    #         datasets.ImageFolder(args.imagenet_val, transform=val_tf),
-    #         batch_size=args.test_batch_size, shuffle=False, **kwargs)
+    elif args.dataset == "imagenet":
+        train_tf = transforms.Compose([
+            transforms.RandomResizedCrop(224, interpolation=InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ])
+        val_tf = transforms.Compose([
+            transforms.Resize(256, interpolation=InterpolationMode.BICUBIC),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ])
+        train_loader = torch.utils.data.DataLoader(
+            datasets.ImageFolder(args.imagenet_train, transform=train_tf),
+            batch_size=args.batch_size, shuffle=True, **kwargs)
+        test_loader = torch.utils.data.DataLoader(
+            datasets.ImageFolder(args.imagenet_val, transform=val_tf),
+            batch_size=args.test_batch_size, shuffle=False, **kwargs)
     else:
         args.percent = [0.8, 0.92, 0.93, 0.94, 0.95, 0.99, 0.99, 0.93]
         # args.num_pre_epochs = 5
