@@ -395,7 +395,7 @@ def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_o
 
 
     # 사이클 반복
-    for c in range(args.num_cycles):
+    for c in tqdm(range(args.num_cycles)):
         print(f'[RigL+ADMM] Cycle {c+1}/{args.num_cycles}')
 
         # (1) 성장용 |grad| 수집 (업데이트 없이 평균)
@@ -492,12 +492,32 @@ def main():
                                transforms.Normalize((0.1307,), (0.3081,))
                            ])),
             batch_size=args.test_batch_size, shuffle=True, **kwargs)
+        
+    # elif args.dataset == "imagenet":
+    #     train_tf = transforms.Compose([
+    #         transforms.RandomResizedCrop(224, interpolation=InterpolationMode.BICUBIC),
+    #         transforms.RandomHorizontalFlip(),
+    #         transforms.ToTensor(),
+    #         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    #     ])
+    #     val_tf = transforms.Compose([
+    #         transforms.Resize(256, interpolation=InterpolationMode.BICUBIC),
+    #         transforms.CenterCrop(224),
+    #         transforms.ToTensor(),
+    #         transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    #     ])
+    #     train_loader = torch.utils.data.DataLoader(
+    #         datasets.ImageFolder(args.imagenet_train, transform=train_tf),
+    #         batch_size=args.batch_size, shuffle=True, **kwargs)
+    #     test_loader = torch.utils.data.DataLoader(
+    #         datasets.ImageFolder(args.imagenet_val, transform=val_tf),
+    #         batch_size=args.test_batch_size, shuffle=False, **kwargs)
     else:
         args.percent = [0.8, 0.92, 0.93, 0.94, 0.95, 0.99, 0.99, 0.93]
-        args.num_pre_epochs = 5
-        args.num_epochs = 20
-        args.num_re_epochs = 5
-        args.num_cycles = 4
+        # args.num_pre_epochs = 5
+        # args.num_epochs = 20
+        # args.num_re_epochs = 5
+        # args.num_cycles = 4
         train_loader = torch.utils.data.DataLoader(
             datasets.CIFAR10('data', train=True, download=True,
                              transform=transforms.Compose([
