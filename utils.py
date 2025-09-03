@@ -2,6 +2,9 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import json
+from sklearn.metrics import precision_score, recall_score, f1_score
+from pathlib import Path
+
 
 
 def regularized_nll_loss(args, model, output, target):
@@ -212,3 +215,93 @@ def print_prune(model, args):
     with open(args.output_dir, 'a') as f:
         json.dump(json_dict, f)
         f.write("\n")
+
+# 온라인 |grad| EMA 누적기
+def online_accumulate_grad_ema(model, grad_ma, beta=0.95, include_bias=False):
+    # grad_ma: dict[name] -> tensor (EMA 상태)
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if p.grad is None or not p.requires_grad:
+                continue
+            if (not include_bias) and name.endswith(".bias"):
+                continue  # conv/linear의 weight 위주로
+
+            g = p.grad.detach().abs()
+            if name not in grad_ma:
+                grad_ma[name] = g.clone()
+            else:
+                # EMA: m = beta*m + (1-beta)*|g|
+                grad_ma[name].mul_(beta).add_(g, alpha=(1.0 - beta))
+
+def enforce_weight_mask(model, masks):
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if name in masks:
+                p.data.mul_(masks[name].to(p.device))
+
+def mask_grads(model, masks):
+    for name, p in model.named_parameters():
+        if name in masks and p.grad is not None:
+            p.grad.mul_(masks[name].to(p.device))
+
+
+def testAndSave(args, model, device, test_loader, prefix, epoch=None):
+    model.eval()
+    test_loss, correct, correct_top5 = 0.0, 0, 0
+    all_preds, all_targets = [], []
+
+    if not args.output_dir:
+        args.output_dir = "./metrics.json"
+
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            test_loss += F.nll_loss(output, target, reduction='sum').item()
+
+            # Top-1
+            pred = output.argmax(dim=1, keepdim=True)
+            correct += pred.eq(target.view_as(pred)).sum().item()
+
+            # Top-5
+            top5 = output.topk(5, dim=1)[1]
+            correct_top5 += top5.eq(target.view(-1,1)).sum().item()
+
+            # Save preds for precision/recall/f1
+            all_preds.extend(pred.view(-1).cpu().numpy())
+            all_targets.extend(target.cpu().numpy())
+
+    # 평균 loss
+    test_loss /= len(test_loader.dataset)
+
+    # Accuracy
+    acc1 = 100. * correct / len(test_loader.dataset)
+    acc5 = 100. * correct_top5 / len(test_loader.dataset)
+
+    # Precision / Recall / F1
+    precision = precision_score(all_targets, all_preds, average='macro')
+    recall = recall_score(all_targets, all_preds, average='macro')
+    f1 = f1_score(all_targets, all_preds, average='macro')
+
+    # === JSON 저장 ===
+    metrics = {
+        "prefix" : prefix,
+        "epoch": epoch if epoch is not None else -1,
+        "loss": test_loss,
+        "top1_acc": acc1,
+        "top5_acc": acc5,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "args": vars(args) if args is not None else {}
+    }
+
+    json_file = Path(args.output_dir)
+    with open(json_file, mode="a") as f:
+        f.write(json.dumps(metrics) + "\n")
+
+    print(f"[Test] Epoch {metrics['epoch']} | "
+          f"Loss {test_loss:.4f}, Top1 {acc1:.2f}%, Top5 {acc5:.2f}%, "
+          f"P {precision:.3f}, R {recall:.3f}, F1 {f1:.3f}")
+
+    return metrics

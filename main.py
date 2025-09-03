@@ -1,18 +1,19 @@
 from __future__ import print_function
 import argparse
 import torch
+import torchvision.models as models
 import torch.nn.functional as F
 from optimizer import PruneAdam
 from model import LeNet, AlexNet
 from utils import apply_prune_random, regularized_nll_loss, admm_loss, \
     initialize_Z_and_U, update_X, update_Z, update_Z_l1, update_U, \
-    print_convergence, print_prune, apply_prune, apply_l1_prune, apply_prune_rigl
+    print_convergence, print_prune, apply_prune, apply_l1_prune, apply_prune_rigl, \
+    enforce_weight_mask, mask_grads, online_accumulate_grad_ema, testAndSave
+from sparsity import *
 from torchvision import datasets, transforms
 from tqdm import tqdm
 import json
 from pathlib import Path
-from sklearn.metrics import precision_score, recall_score, f1_score
-
 
 # ==============================================================
 # 학습에 마스크를 적용할 "가중치 파라미터"만 수집
@@ -24,22 +25,6 @@ def _collect_maskable_params(model):
             named.append((name, p))
     return named
 
-# 온라인 |grad| EMA 누적기
-def online_accumulate_grad_ema(model, grad_ma, beta=0.95, include_bias=False):
-    # grad_ma: dict[name] -> tensor (EMA 상태)
-    with torch.no_grad():
-        for name, p in model.named_parameters():
-            if p.grad is None or not p.requires_grad:
-                continue
-            if (not include_bias) and name.endswith(".bias"):
-                continue  # conv/linear의 weight 위주로
-
-            g = p.grad.detach().abs()
-            if name not in grad_ma:
-                grad_ma[name] = g.clone()
-            else:
-                # EMA: m = beta*m + (1-beta)*|g|
-                grad_ma[name].mul_(beta).add_(g, alpha=(1.0 - beta))
 
 # ==============================================================
 # ### 파라미터 별 IN/OUT Shape Info 저장
@@ -105,6 +90,7 @@ def _allocate_density_erk_er(params, target_sparsity, method="erk"):
         densities[name] = min(1.0, eps * f[name])
     return densities
 
+
 # ==============================================================
 # ### 마스크 초기화 및 ER, ERK Sparsity 계산
 # ==============================================================
@@ -128,19 +114,6 @@ def initialize_masks(model, target_sparsity=0.9, method="erk", device="cpu"):
             masks[name] = mask.to(device)
             p.data.mul_(masks[name].to(p.device))  # pruned=0
     return masks, densities
-
-
-def enforce_weight_mask(model, masks):
-    with torch.no_grad():
-        for name, p in model.named_parameters():
-            if name in masks:
-                p.data.mul_(masks[name].to(p.device))
-
-
-def mask_grads(model, masks):
-    for name, p in model.named_parameters():
-        if name in masks and p.grad is not None:
-            p.grad.mul_(masks[name].to(p.device))
 
 
 # ==============================================================
@@ -229,6 +202,80 @@ def rigl_grow_once(model, masks, grow_frac, grad_buffers):
     return masks
 
 
+def rigl_grow_once_chore(model, masks, grow_frac, grad_buffers, show_tqdm=True):
+    # --- 사전 계산: 파라미터/레이어 목록 & 맵 ---
+    param_list = [(n, p) for (n, p) in model.named_parameters() if n in masks]
+    name2idx   = {n: i for i, (n, _) in enumerate(param_list)}
+    idx2name   = {i: n for n, i in name2idx.items()}
+
+    # 성장 개수 g
+    active_total = sum(m.sum().item() for m in masks.values())
+    g = int(max(1, round(active_total * float(grow_frac))))
+    if g <= 0:
+        return masks
+
+    # --- 1) pruned 위치와 그 |grad| 수집 (tensor로만, Python 튜플 금지) ---
+    chunks = []
+    owners = []     # 각 엘리먼트가 어느 레이어(정수 id)에 속하는지
+    flats  = []     # 레이어 안에서의 flat index
+    pbar = tqdm(param_list, total=len(param_list), desc="Collect pruned grads",
+                disable=not show_tqdm, dynamic_ncols=True, leave=False)
+    for name, p in pbar:
+        m = masks[name].view(-1).bool()
+        pruned_idx = (~m).nonzero(as_tuple=False).view(-1)
+        if pruned_idx.numel() == 0:
+            continue
+        gabs = grad_buffers.get(name, None)
+        if gabs is None:
+            continue
+        gabs = gabs.view(-1)[pruned_idx]  # pruned 위치의 |grad|
+        if gabs.numel() == 0:
+            continue
+
+        chunks.append(gabs)                                   # scores
+        owners.append(torch.full((gabs.numel(),), name2idx[name],
+                                 dtype=torch.int32, device=gabs.device))
+        flats.append(pruned_idx.to(torch.int64))              # local flat indices
+
+    if not chunks:
+        return masks
+
+    scores_all = torch.cat(chunks, dim=0)
+    owners_all = torch.cat(owners, dim=0)
+    flats_all  = torch.cat(flats,  dim=0)
+
+    # --- 2) 전역 top-k 선택 ---
+    k = min(g, scores_all.numel())
+    _, topk_idx = torch.topk(scores_all, k=k, largest=True, sorted=False)
+    top_owners  = owners_all.index_select(0, topk_idx)
+    top_flats   = flats_all.index_select(0, topk_idx)
+
+    # --- 3) 선택된 인덱스를 레이어별로 묶어서 한 번에 적용 ---
+    unique_layers = torch.unique(top_owners)
+    apply_pbar = tqdm(unique_layers.tolist(), desc="Activate connections",
+                      disable=not show_tqdm, dynamic_ncols=True, leave=False)
+    with torch.no_grad():
+        # param 딕셔너리는 한 번만 생성
+        name2param = {n: p for (n, p) in param_list}
+        for lid in apply_pbar:
+            lid = int(lid)
+            name = idx2name[lid]
+            sel_mask = (top_owners == lid)
+            sel_idx  = top_flats[sel_mask]             # 이 레이어 내 flat index들
+
+            # 마스크/파라미터 갱신 (벡터화)
+            mask_flat = masks[name].view(-1)
+            mask_flat.index_fill_(0, sel_idx, True)
+            masks[name] = mask_flat.view_as(masks[name])
+
+            p = name2param[name].view(-1)
+            p.index_fill_(0, sel_idx, 0.0)             # 새로 켠 가중치 0으로 초기화
+
+    # step 후 값만 0 유지 (forward에서는 mask 곱 X 권장)
+    enforce_weight_mask(model, masks)
+    return masks
+
+
 # ==============================================================
 # ### [RIGL+ADMM ADDED] 현재 모델에서 "마스크 복원" (apply_prune 이후 사용)
 # - 요구사항: ADMM 프루닝이 끝난 뒤, 다음 사이클에서 쓸 마스크를 모델에서 재생성
@@ -245,7 +292,7 @@ def rebuild_masks_from_weights(model, device="cpu"):
 # ==============================================================
 # ### ADMM Pruning 사이클 (Interval 크기만큼 Epoch 반복)
 # ==============================================================
-def admm_prune_stage(args, model, device, train_loader, test_loader, masks, optimizer, densities, epochs, cycle, grad_buffers):
+def admm_prune_stage(args, model, device, train_loader, test_loader, masks, optimizer, epochs, cycle, grad_buffers):
     Z, U = initialize_Z_and_U(model)
     for epoch in range(epochs):
         print(f'[RigL+ADMM] ADMM epoch {epoch+1}/{epochs}')
@@ -268,13 +315,10 @@ def admm_prune_stage(args, model, device, train_loader, test_loader, masks, opti
         testAndSave(args, model, device, test_loader, f"ADMM-Cycle {cycle}", epoch)
 
     # 목표 희소도까지 프루닝
-    if args.init_method == "random":
-        if args.l1:
-            masks = apply_l1_prune(model, device, args)
-        else:
-            masks = apply_prune(model, device, args)
+    if args.l1:
+        masks = apply_l1_prune(model, device, args)
     else:
-        masks = apply_prune_rigl(model, device, densities)
+        masks = apply_prune(model, device, args)
 
     # 프루닝 후 모델에서 새 마스크 복원 (다음 사이클에 사용)
     new_masks = rebuild_masks_from_weights(model, device=device)
@@ -317,66 +361,6 @@ def train_admm_full(args, model, device, train_loader, test_loader, optimizer):
         testAndSave(args, model, device, test_loader, "ADMM-Train", epoch)
 
 
-def testAndSave(args, model, device, test_loader, prefix, epoch=None):
-    model.eval()
-    test_loss, correct, correct_top5 = 0.0, 0, 0
-    all_preds, all_targets = [], []
-
-    if not args.output_dir:
-        args.output_dir = "./metrics.json"
-
-    with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            test_loss += F.nll_loss(output, target, reduction='sum').item()
-
-            # Top-1
-            pred = output.argmax(dim=1, keepdim=True)
-            correct += pred.eq(target.view_as(pred)).sum().item()
-
-            # Top-5
-            top5 = output.topk(5, dim=1)[1]
-            correct_top5 += top5.eq(target.view(-1,1)).sum().item()
-
-            # Save preds for precision/recall/f1
-            all_preds.extend(pred.view(-1).cpu().numpy())
-            all_targets.extend(target.cpu().numpy())
-
-    # 평균 loss
-    test_loss /= len(test_loader.dataset)
-
-    # Accuracy
-    acc1 = 100. * correct / len(test_loader.dataset)
-    acc5 = 100. * correct_top5 / len(test_loader.dataset)
-
-    # Precision / Recall / F1
-    precision = precision_score(all_targets, all_preds, average='macro')
-    recall = recall_score(all_targets, all_preds, average='macro')
-    f1 = f1_score(all_targets, all_preds, average='macro')
-
-    # === JSON 저장 ===
-    metrics = {
-        "prefix" : prefix,
-        "epoch": epoch if epoch is not None else -1,
-        "loss": test_loss,
-        "top1_acc": acc1,
-        "top5_acc": acc5,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "args": vars(args) if args is not None else {}
-    }
-
-    json_file = Path(args.output_dir)
-    with open(json_file, mode="a") as f:
-        f.write(json.dumps(metrics) + "\n")
-
-    print(f"[Test] Epoch {metrics['epoch']} | "
-          f"Loss {test_loss:.4f}, Top1 {acc1:.2f}%, Top5 {acc5:.2f}%, "
-          f"P {precision:.3f}, R {recall:.3f}, F1 {f1:.3f}")
-
-    return metrics
 
 
 # ==============================================================
@@ -399,18 +383,9 @@ def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_o
             online_accumulate_grad_ema(model, grad_buf, beta=0.95)
             optimizer.step()
         testAndSave(args, model, device, test_loader, "Pretraining", epoch)
-
+    testAndSave(args, model, device, test_loader, "Dense Model Test")
     # (0) 초기 희소 모델 생성(ER/ERK)
-    densities = None
-    if args.init_method == "random":
-        masks = apply_prune(model, device, args)
-    else:
-        masks, densities = initialize_masks(
-            model,
-            target_sparsity=args.sparsity,
-            method=args.init_method,
-            device=device
-        )
+    masks = apply_prune(model, device, args)
     enforce_weight_mask(model, masks)
 
 
@@ -422,11 +397,11 @@ def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_o
         # grad_buf = collect_grad_for_growth(model, device, train_loader, steps=args.grow_grad_steps)
 
         # (2) RigL 성장: pruned 중 |grad| 상위 → 활성화(가중치 0으로 초기화)
-        masks = rigl_grow_once(model, masks, grow_frac=args.grow_frac, grad_buffers=grad_buf)
+        masks = rigl_grow_once_chore(model, masks, grow_frac=args.grow_frac, grad_buffers=grad_buf)
         grad_buf = {}
         # (3) ADMM 프루닝 스테이지: 짧게 학습 후 apply_prune로 목표 희소율 달성
         masks = admm_prune_stage(args, model, device, train_loader, test_loader, masks,
-                                 optimizer, densities, epochs=args.grow_interval, cycle=c + 1,
+                                 optimizer, epochs=args.grow_interval, cycle=c + 1,
                                  grad_buffers=grad_buf)
 
     print('[RigL+ADMM] Final fixed-mask retraining...')
@@ -468,6 +443,8 @@ def main():
     parser.add_argument('--rho', type=float, default=1e-2, metavar='R')
     parser.add_argument('--l1', action='store_true', default=False,
                         help='use l1 ADMM regularization/pruning (instead of cardinality)')
+    
+    # ADMM Epoch 관련 파라미터
     parser.add_argument('--l2', action='store_true', default=False)
     parser.add_argument('--num_pre_epochs', type=int, default=3, metavar='P')
     parser.add_argument('--num_epochs', type=int, default=10, metavar='N')
@@ -483,11 +460,17 @@ def main():
     # RigL + ADMM 파라미터
     parser.add_argument('--use-rigl-admm', action='store_true', default=False,
                         help='enable Grow (RigL) -> ADMM pruning cycles')
-    parser.add_argument('--sparsity', type=float, default=0.98, help='global target sparsity (0~1)')
-    parser.add_argument('--init-method', type=str, default='random', choices=['erk', 'er', 'random'])
+    parser.add_argument('--sparsity', type=float, default=0.99, help='global target sparsity (0~1)')
+    parser.add_argument('--sparsity-method', type=str, default='uniform', choices=['erk', 'er', 'uniform'])
+
+    # RigL + ADMM Epoch 설정 파라미터
     parser.add_argument('--num-cycles', type=int, default=3)
     parser.add_argument('--grow-interval', type=int, default=5)
+
+    # Grow 단계 관련 파라미터
     parser.add_argument('--grow-frac', type=float, default=0.1)
+
+    # Online 계산 사용시 무효화
     parser.add_argument('--grow-grad-steps', type=int, default=50)
 
     args = parser.parse_args()
@@ -513,26 +496,40 @@ def main():
                                transforms.Normalize((0.1307,), (0.3081,))
                            ])),
             batch_size=args.test_batch_size, shuffle=True, **kwargs)
-        
     elif args.dataset == "imagenet":
-        train_tf = transforms.Compose([
-            transforms.RandomResizedCrop(224, interpolation=InterpolationMode.BICUBIC),
-            transforms.RandomHorizontalFlip(),
+        data_dir = "./imagenet"
+
+        train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(224),    # 랜덤 크롭 후 224x224로 리사이즈
+            transforms.RandomHorizontalFlip(),    # 랜덤 좌우 반전
             transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],       # ImageNet 통계값 (mean, std)
+                std=[0.229, 0.224, 0.225]
+            ),
         ])
-        val_tf = transforms.Compose([
-            transforms.Resize(256, interpolation=InterpolationMode.BICUBIC),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ])
+        test_transform = transforms.Compose([
+                    transforms.Resize(256),              # 짧은 쪽 256으로 resize
+                    transforms.CenterCrop(224),          # 가운데 224x224 crop
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],      # ImageNet mean
+                        std=[0.229, 0.224, 0.225]        # ImageNet std
+                    ),
+                ])
+        
+        # train & val dataset
+        train_dataset = datasets.ImageFolder(root=f"{data_dir}/train", transform=train_transform)
+        test_dataset  = datasets.ImageFolder(root=f"{data_dir}/val",   transform=test_transform)
+
+        # DataLoader
         train_loader = torch.utils.data.DataLoader(
-            datasets.ImageFolder(args.imagenet_train, transform=train_tf),
-            batch_size=args.batch_size, shuffle=True, **kwargs)
+            train_dataset, batch_size=128, shuffle=True, num_workers=8, pin_memory=True
+        )
         test_loader = torch.utils.data.DataLoader(
-            datasets.ImageFolder(args.imagenet_val, transform=val_tf),
-            batch_size=args.test_batch_size, shuffle=False, **kwargs)
+            test_dataset, batch_size=128, shuffle=False, num_workers=8, pin_memory=True
+        )
+
     else:
         args.percent = [0.8, 0.92, 0.93, 0.94, 0.95, 0.99, 0.99, 0.93]
         # args.num_pre_epochs = 5
@@ -554,10 +551,24 @@ def main():
                                                       (0.24703233, 0.24348505, 0.26158768))
                              ])), shuffle=True, batch_size=args.test_batch_size, **kwargs)
 
-    model = LeNet().to(device) if args.dataset == "mnist" else AlexNet().to(device)
+    if args.dataset == "imagenet":
+        model = models.resnet18(pretrained=True).to(device)
+        num_classes = 1000
+        model.fc = nn.Sequential(
+            nn.Linear(model.fc.in_features, num_classes),
+            nn.LogSoftmax(dim=1)
+        )
+    else:
+        model = LeNet().to(device) if args.dataset == "mnist" else AlexNet().to(device)
     BaseOpt = PruneAdam
 
     if args.use_rigl_admm:
+        if args.sparsity_method == 'erk':
+            args.percent = get_pruning_sparsities_erk(model, args)
+        elif args.sparsity_method == 'er':
+            args.percent = get_pruning_sparsities_erk(model, args, include_kernel=False)
+        else:
+            args.percent = get_pruning_sparsities_uniform(model, args)
         rigl_admm_cycle_train(args, model, device, train_loader, test_loader, BaseOpt)
     else:
         optimizer = BaseOpt(model.named_parameters(), lr=args.lr, eps=args.adam_epsilon)
