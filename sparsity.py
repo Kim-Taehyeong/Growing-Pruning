@@ -3,12 +3,12 @@ import numpy as np
 
 def get_pruning_sparsities_uniform(model, args):
     sparsities = []
-    first_layer = True
-    for module in model.modules():
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
-            if first_layer:
-                sparsities.append(0.0)
-                first_layer = False
+    first = True
+    for name, param in model.named_parameters():
+        if name.endswith("weight") and param.dim() >= 2:
+            if first:
+                sparsities.append(0.0)   # 첫 레이어 dense
+                first = False
             else:
                 sparsities.append(args.sparsity)
     return sparsities
@@ -16,10 +16,11 @@ def get_pruning_sparsities_uniform(model, args):
 def get_pruning_sparsities_erk(model, args, include_kernel=True, erk_power_scale=1.0):
     all_layers = []
     first_layer = True
-    for module in model.modules():
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
-            shape = list(module.weight.shape)
-            all_layers.append((module, shape, first_layer))
+    
+    for name, param in model.named_parameters():
+        if name.endswith("weight") and param.dim() >= 2:
+            shape = list(param.shape)
+            all_layers.append((name, shape, first_layer))
             first_layer = False
 
     # 기본 sparsity

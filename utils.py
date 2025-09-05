@@ -9,10 +9,13 @@ from pathlib import Path
 
 def regularized_nll_loss(args, model, output, target):
     index = 0
-    loss = F.nll_loss(output, target)
+    if args.dataset == "imagenet":
+        loss = F.cross_entropy(output, target)
+    else:
+        loss = F.nll_loss(output, target)
     if args.l2:
         for name, param in model.named_parameters():
-            if name.split('.')[-1] == "weight":
+            if name.split('.')[-1] == "weight" and param.dim() >= 2:
                 loss += args.alpha * param.norm()
                 index += 1
     return loss
@@ -20,9 +23,12 @@ def regularized_nll_loss(args, model, output, target):
 
 def admm_loss(args, device, model, Z, U, output, target):
     idx = 0
-    loss = F.nll_loss(output, target)
+    if args.dataset == "imagenet":
+        loss = F.cross_entropy(output, target)
+    else:
+        loss = F.nll_loss(output, target)
     for name, param in model.named_parameters():
-        if name.split('.')[-1] == "weight":
+        if name.split('.')[-1] == "weight" and param.dim() >= 2:
             u = U[idx].to(device)
             z = Z[idx].to(device)
             loss += args.rho / 2 * (param - z + u).norm()
@@ -36,7 +42,7 @@ def initialize_Z_and_U(model):
     Z = ()
     U = ()
     for name, param in model.named_parameters():
-        if name.split('.')[-1] == "weight":
+        if name.split('.')[-1] == "weight" and param.dim() >= 2:
             Z += (param.detach().cpu().clone(),)
             U += (torch.zeros_like(param).cpu(),)
     return Z, U
@@ -45,7 +51,7 @@ def initialize_Z_and_U(model):
 def update_X(model):
     X = ()
     for name, param in model.named_parameters():
-        if name.split('.')[-1] == "weight":
+        if name.split('.')[-1] == "weight" and param.dim() >= 2:
             X += (param.detach().cpu().clone(),)
     return X
 
@@ -126,7 +132,8 @@ def apply_prune(model, device, args):
     dict_mask = {}
     idx = 0
     for name, param in model.named_parameters():
-        if name.split('.')[-1] == "weight":
+        if name.split('.')[-1] == "weight" and param.dim() >= 2:
+            print(name, idx)
             mask = prune_weight(param, device, args.percent[idx])
             param.data.mul_(mask)
             # param.data = torch.Tensor(weight_pruned).to(device)
@@ -144,7 +151,7 @@ def apply_prune_random(model, device, args):
     gen = torch.Generator(device=device)
     gen.manual_seed(args.seed)
     for name, param in model.named_parameters():
-        if name.split('.')[-1] == "weight":
+        if name.split('.')[-1] == "weight" and param.dim() >= 2:
             mask = prune_weight_random(param, device, args.percent[idx], gen)
             param.data.mul_(mask)
             dict_mask[name] = mask
@@ -172,7 +179,7 @@ def apply_l1_prune(model, device, args):
     dict_mask = {}
     idx = 0
     for name, param in model.named_parameters():
-        if name.split('.')[-1] == "weight":
+        if name.split('.')[-1] == "weight" and param.dim() >= 2:
             mask = prune_l1_weight(param, device, delta)
             param.data.mul_(mask)
             dict_mask[name] = mask
@@ -183,8 +190,8 @@ def apply_l1_prune(model, device, args):
 def print_convergence(model, X, Z):
     idx = 0
     print("normalized norm of (weight - projection)")
-    for name, _ in model.named_parameters():
-        if name.split('.')[-1] == "weight":
+    for name, param in model.named_parameters():
+        if name.split('.')[-1] == "weight" and param.dim() >= 2:
             x, z = X[idx], Z[idx]
             print("({}): {:.4f}".format(name, (x-z).norm().item() / x.norm().item()))
             idx += 1
@@ -257,7 +264,10 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None):
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
-            test_loss += F.nll_loss(output, target, reduction='sum').item()
+            if args.dataset == "imagenet":
+                test_loss += F.cross_entropy(output, target, reduction='sum').item()
+            else:
+                test_loss += F.nll_loss(output, target, reduction='sum').item()
 
             # Top-1
             pred = output.argmax(dim=1, keepdim=True)

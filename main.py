@@ -429,7 +429,7 @@ def main():
     parser = argparse.ArgumentParser(description='PyTorch MNIST/CIFAR with ADMM or RigL+ADMM')
 
     # Dataset
-    parser.add_argument('--dataset', type=str, default="mnist", choices=["mnist", "cifar10"], metavar='D')
+    parser.add_argument('--dataset', type=str, default="mnist", choices=["mnist", "cifar10", "imagenet"], metavar='D')
     parser.add_argument('--output-dir', type=str, default="", metavar='O', help='Directory to save metrics JSON files')
 
     # Batches
@@ -497,7 +497,7 @@ def main():
                            ])),
             batch_size=args.test_batch_size, shuffle=True, **kwargs)
     elif args.dataset == "imagenet":
-        data_dir = "./imagenet"
+        data_dir = "C:\\Users\\gicht\\Downloads"
 
         train_transform = transforms.Compose([
             transforms.RandomResizedCrop(224),    # 랜덤 크롭 후 224x224로 리사이즈
@@ -519,8 +519,8 @@ def main():
                 ])
         
         # train & val dataset
-        train_dataset = datasets.ImageFolder(root=f"{data_dir}/train", transform=train_transform)
-        test_dataset  = datasets.ImageFolder(root=f"{data_dir}/val",   transform=test_transform)
+        train_dataset = datasets.ImageFolder(root=f"{data_dir}\\ILSVRC2012_img_train", transform=train_transform)
+        test_dataset  = datasets.ImageFolder(root=f"{data_dir}\\ILSVRC2012_img_val",   transform=test_transform)
 
         # DataLoader
         train_loader = torch.utils.data.DataLoader(
@@ -553,11 +553,6 @@ def main():
 
     if args.dataset == "imagenet":
         model = models.resnet18(pretrained=True).to(device)
-        num_classes = 1000
-        model.fc = nn.Sequential(
-            nn.Linear(model.fc.in_features, num_classes),
-            nn.LogSoftmax(dim=1)
-        )
     else:
         model = LeNet().to(device) if args.dataset == "mnist" else AlexNet().to(device)
     BaseOpt = PruneAdam
@@ -569,6 +564,7 @@ def main():
             args.percent = get_pruning_sparsities_erk(model, args, include_kernel=False)
         else:
             args.percent = get_pruning_sparsities_uniform(model, args)
+        print(args.percent)
         rigl_admm_cycle_train(args, model, device, train_loader, test_loader, BaseOpt)
     else:
         optimizer = BaseOpt(model.named_parameters(), lr=args.lr, eps=args.adam_epsilon)
@@ -583,7 +579,10 @@ def main():
                 data, target = data.to(device), target.to(device)
                 optimizer.zero_grad()
                 output = model(data)
-                loss = F.nll_loss(output, target)
+                if args.dataset == "imagenet":
+                    loss = F.cross_entropy(output, target)
+                else:
+                    loss = F.nll_loss(output, target)
                 loss.backward()
                 optimizer.prune_step(mask)
             testAndSave(args, model, device, test_loader, "ADMM-Re-Training", epoch)
