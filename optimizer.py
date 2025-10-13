@@ -19,7 +19,7 @@ class _RequiredParameter(object):
 required = _RequiredParameter()
 
 
-class NameOptimizer(object):
+class NameOptimizer(torch.optim.Optimizer):
     r"""Base class for all optimizers.
 
     .. warning::

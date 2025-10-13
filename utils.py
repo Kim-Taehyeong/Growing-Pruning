@@ -4,6 +4,8 @@ import numpy as np
 import json
 from sklearn.metrics import precision_score, recall_score, f1_score
 from pathlib import Path
+from thop import profile
+from scipy import optimize as opt
 
 
 
@@ -201,6 +203,8 @@ def print_prune(model, args):
     prune_param, total_param = 0, 0
     json_dict = {}
     for name, param in model.named_parameters():
+        if param.dim() < 2:
+            continue
         if name.split('.')[-1] == "weight":
             json_dict[name] = {
                 "percentage" : 100 * (abs(param) == 0).sum().item() / param.numel(),
@@ -252,13 +256,83 @@ def mask_grads(model, masks):
             p.grad.mul_(masks[name].to(p.device))
 
 
-def testAndSave(args, model, device, test_loader, prefix, epoch=None):
+
+def _count_sparse_flops(model, sample_input):
+    """
+    Forward hooks를 사용하여 희소 모델(pruned model)의 FLOPs를 계산하는 함수.
+    가중치가 0인 연산은 FLOPs 계산에서 제외합니다.
+
+    NOTE: 이 계산은 근사치이며, 모든 종류의 레이어를 지원하지 않을 수 있습니다.
+          주로 Conv2d와 Linear 레이어에 초점을 맞춥니다.
+    """
+    total_flops = 0
+
+    def multiply_adds_hook(module, input, output):
+        nonlocal total_flops
+        # torch.nn.Linear
+        if isinstance(module, torch.nn.Linear):
+            batch_size = input[0].shape[0] if input[0].dim() > 1 else 1
+            nonzero_weights = torch.count_nonzero(module.weight)
+            # 가중치에 대한 곱셈-누산(Multiply-Accumulate) 연산
+            macs = nonzero_weights * batch_size
+            total_flops += 2 * macs # 1 MAC = 2 FLOPs (곱셈 1, 덧셈 1)
+            # Bias 덧셈 연산
+            if module.bias is not None:
+                total_flops += module.bias.numel() * batch_size
+
+        # torch.nn.Conv2d
+        elif isinstance(module, torch.nn.Conv2d):
+            batch_size, _, output_h, output_w = output.shape
+            nonzero_weights = torch.count_nonzero(module.weight)
+            # 커널의 0이 아닌 가중치에 대한 MACs
+            macs = output_h * output_w * (nonzero_weights / module.groups) * batch_size
+            total_flops += 2 * macs # 1 MAC = 2 FLOPs
+            # Bias 덧셈 연산
+            if module.bias is not None:
+                total_flops += module.bias.numel() * output_h * output_w * batch_size
+
+    hooks = []
+    # 모든 Conv2d와 Linear 레이어에 hook 등록
+    for module in model.modules():
+        if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear)):
+            hooks.append(module.register_forward_hook(multiply_adds_hook))
+
+    # FLOPs 계산을 위해 dummy forward pass 실행
+    with torch.no_grad():
+        model(sample_input)
+
+    # 등록된 hook 제거
+    for hook in hooks:
+        hook.remove()
+
+    return total_flops
+
+def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=None):
+    """
+    모델을 테스트하고 성능 지표를 계산하여 JSON 파일에 저장하는 함수.
+    파라미터 수와 GFLOPs 계산 기능이 추가되었습니다.
+    """
     model.eval()
     test_loss, correct, correct_top5 = 0.0, 0, 0
     all_preds, all_targets = [], []
 
     if not args.output_dir:
         args.output_dir = "./metrics.json"
+
+    # --- 파라미터 및 FLOPs 계산 ---
+    # 샘플 입력을 가져와서 GFLOPs 계산에 사용
+    sample_input, _ = next(iter(test_loader))
+    sample_input = sample_input.to(device)
+
+    # 0인 가중치를 제외하고 FLOPs 계산
+    flops = _count_sparse_flops(model, sample_input)
+    gflops = flops / 1e9  # GFLOPs 단위로 변환
+
+    # 전체 파라미터 수 계산
+    total_params = sum(p.numel() for p in model.parameters())
+    # 0이 아닌 가중치(pruning된 모델 고려)의 파라미터 수 계산
+    nonzero_params = sum(torch.count_nonzero(p) for p in model.parameters() if p.requires_grad)
+    # --- 계산 종료 ---
 
     with torch.no_grad():
         for data, target in test_loader:
@@ -269,29 +343,33 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None):
             else:
                 test_loss += F.nll_loss(output, target, reduction='sum').item()
 
-            # Top-1
+            # Top-1 정확도
             pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
 
-            # Top-5
+            # Top-5 정확도
             top5 = output.topk(5, dim=1)[1]
             correct_top5 += top5.eq(target.view(-1,1)).sum().item()
 
-            # Save preds for precision/recall/f1
+            # Precision/Recall/F1을 위한 예측값 저장
             all_preds.extend(pred.view(-1).cpu().numpy())
             all_targets.extend(target.cpu().numpy())
 
-    # 평균 loss
+    # 평균 손실
     test_loss /= len(test_loader.dataset)
 
-    # Accuracy
+    # 정확도
     acc1 = 100. * correct / len(test_loader.dataset)
     acc5 = 100. * correct_top5 / len(test_loader.dataset)
 
     # Precision / Recall / F1
-    precision = precision_score(all_targets, all_preds, average='macro')
-    recall = recall_score(all_targets, all_preds, average='macro')
-    f1 = f1_score(all_targets, all_preds, average='macro')
+    precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
+    recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
+    f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)
+
+    current_lr = None
+    if optimizer is not None:
+        current_lr = optimizer.param_groups[0]['lr']
 
     # === JSON 저장 ===
     metrics = {
@@ -303,6 +381,10 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None):
         "precision": precision,
         "recall": recall,
         "f1": f1,
+        "total_params_M": total_params / 1e6,
+        "nonzero_params_M": nonzero_params.item() / 1e6,
+        "gflops": gflops,
+        "lr": current_lr,
         "args": vars(args) if args is not None else {}
     }
 
@@ -310,8 +392,34 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None):
     with open(json_file, mode="a") as f:
         f.write(json.dumps(metrics) + "\n")
 
-    print(f"[Test] Epoch {metrics['epoch']} | "
+    # --- 출력 포맷 수정 ---
+    print(f"[{prefix}] Epoch {metrics['epoch']} | "
+          f"Params(M): {metrics['nonzero_params_M']:.2f}/{metrics['total_params_M']:.2f} | "
+          f"GFLOPs: {metrics['gflops']:.2f} | "
           f"Loss {test_loss:.4f}, Top1 {acc1:.2f}%, Top5 {acc5:.2f}%, "
-          f"P {precision:.3f}, R {recall:.3f}, F1 {f1:.3f}")
+          f"P {precision:.3f}, R {recall:.3f}, F1 {f1:.3f} | "
+          f"LR {current_lr}"
+    )
 
     return metrics
+
+def equation_to_solve(alpha, target_t, n, c):
+    calculated_t = ((1 - alpha)**n) * ((1 + c * alpha)**(n - 1))
+    return target_t - calculated_t
+
+def find_alpha_for_t(target_t, n, c):
+    """
+    주어진 T, N, c에 대해 α를 계산하는 함수
+    """
+    try:
+        # brentq를 사용하여 [0, 1] 범위 내에서 해를 찾음
+        alpha_solution = opt.brentq(
+            f=equation_to_solve,
+            a=0,
+            b=1,
+            args=(target_t, n, c)
+        )
+        return alpha_solution
+    except ValueError:
+        # 해를 찾지 못한 경우 (거의 발생하지 않음)
+        return None

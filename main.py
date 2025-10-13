@@ -8,7 +8,7 @@ from model import LeNet, AlexNet
 from utils import apply_prune_random, regularized_nll_loss, admm_loss, \
     initialize_Z_and_U, update_X, update_Z, update_Z_l1, update_U, \
     print_convergence, print_prune, apply_prune, apply_l1_prune, apply_prune_rigl, \
-    enforce_weight_mask, mask_grads, online_accumulate_grad_ema, testAndSave
+    enforce_weight_mask, mask_grads, online_accumulate_grad_ema, testAndSave, find_alpha_for_t
 from sparsity import *
 from torchvision import datasets, transforms
 from tqdm import tqdm
@@ -275,6 +275,72 @@ def rigl_grow_once_chore(model, masks, grow_frac, grad_buffers, show_tqdm=True):
     enforce_weight_mask(model, masks)
     return masks
 
+def rigl_grow_once_chore_layer_wise(model, masks, grow_fracs_list, grad_buffers, show_tqdm: bool = True):
+    # --- 사전 계산: 마스크가 적용된 파라미터 목록 ---
+    param_list = [(n, p) for n, p in model.named_parameters() if n in masks]
+
+    # --- 입력 검증 및 grow_frac 매핑 ---
+    # grow_fracs_list의 길이가 레이어 수와 맞는지 확인
+    if len(grow_fracs_list) != len(param_list):
+        raise ValueError(
+            f"Length of grow_fracs_list ({len(grow_fracs_list)}) must match "
+            f"the number of prunable layers ({len(param_list)})."
+        )
+    # 사용하기 쉽도록 리스트를 레이어 이름 기반의 딕셔너리로 변환
+    grow_fracs = {name: frac for (name, _), frac in zip(param_list, grow_fracs_list)}
+
+    # --- 각 레이어별로 순회하며 성장 진행 ---
+    pbar = tqdm(param_list, total=len(param_list), desc="Layer-wise Growing",
+                disable=not show_tqdm, dynamic_ncols=True, leave=False)
+
+    with torch.no_grad():
+        for name, p in pbar:
+            # 이 레이어에 할당된 성장률(grow_frac) 가져오기
+            layer_grow_frac = grow_fracs.get(name, 0.0)
+            if layer_grow_frac <= 0:
+                continue
+
+            # 1. 레이어별 성장 개수(g_layer) 계산
+            #    (기존) 전역 g를 분배 -> (변경) 레이어의 활성 파라미터 수에 직접 성장률 곱하기
+            active_params_layer = masks[name].sum().item()
+            g_layer = int(round(active_params_layer * layer_grow_frac))
+            if g_layer <= 0:
+                continue
+
+            # 2. 이 레이어의 Pruned 위치와 그래디언트 절대값 수집
+            mask_flat = masks[name].view(-1)
+            pruned_idx = (~mask_flat.bool()).nonzero(as_tuple=False).view(-1)
+
+            # 성장시킬 파라미터가 없으면(전부 활성화 상태이면) 건너뜀
+            if pruned_idx.numel() == 0:
+                continue
+
+            gabs = grad_buffers.get(name, None)
+            if gabs is None:
+                continue
+
+            pruned_grads = gabs.view(-1)[pruned_idx]
+
+            # 3. 이 레이어 내에서만 top-k 선택
+            # 성장시킬 수 있는 최대 개수는 현재 pruned된 파라미터 개수를 넘을 수 없음
+            k = min(g_layer, pruned_grads.numel())
+            if k <= 0:
+                continue
+
+            _, topk_local_idx = torch.topk(pruned_grads, k=k, largest=True, sorted=False)
+
+            # 4. 실제 마스크 상의 인덱스 가져오기 및 갱신
+            grow_indices = pruned_idx[topk_local_idx]
+            mask_flat.index_fill_(0, grow_indices, True)
+            
+            # 새로 성장한 가중치는 0으로 초기화
+            p_flat = p.view(-1)
+            p_flat.index_fill_(0, grow_indices, 0.0)
+
+    # step 후 마스크를 가중치에 적용하여 0으로 유지
+    enforce_weight_mask(model, masks)
+    return masks
+
 
 # ==============================================================
 # ### [RIGL+ADMM ADDED] 현재 모델에서 "마스크 복원" (apply_prune 이후 사용)
@@ -312,7 +378,7 @@ def admm_prune_stage(args, model, device, train_loader, test_loader, masks, opti
         Z = update_Z_l1(X, U, args) if args.l1 else update_Z(X, U, args)
         U = update_U(U, X, Z)
         print_convergence(model, X, Z)
-        testAndSave(args, model, device, test_loader, f"ADMM-Cycle {cycle}", epoch)
+        testAndSave(args, model, device, test_loader, f"ADMM-Cycle {cycle}", epoch, optimizer=optimizer)
 
     # 목표 희소도까지 프루닝
     if args.l1:
@@ -323,7 +389,7 @@ def admm_prune_stage(args, model, device, train_loader, test_loader, masks, opti
     # 프루닝 후 모델에서 새 마스크 복원 (다음 사이클에 사용)
     new_masks = rebuild_masks_from_weights(model, device=device)
     print_prune(model, args)
-    testAndSave(args, model, device, test_loader, f"ADMM-Cycle {cycle} Post-Pruning")
+    testAndSave(args, model, device, test_loader, f"ADMM-Cycle {cycle} Post-Pruning", optimizer=optimizer)
     return new_masks
 
 
@@ -368,6 +434,9 @@ def train_admm_full(args, model, device, train_loader, test_loader, optimizer):
 # ==============================================================
 def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_optimizer_cls):
     optimizer = base_optimizer_cls(model.named_parameters(), lr=args.lr, eps=args.adam_epsilon)
+    main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_cycles)
+    retrain_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_re_epochs)
+    combined_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[main_scheduler, retrain_scheduler], milestones=[args.num_cycles])
     grad_buf = {}
 
     # 사전 학습
@@ -383,10 +452,11 @@ def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_o
             online_accumulate_grad_ema(model, grad_buf, beta=0.95)
             optimizer.step()
         testAndSave(args, model, device, test_loader, "Pretraining", epoch)
-    testAndSave(args, model, device, test_loader, "Dense Model Test")
+    testAndSave(args, model, device, test_loader, "Dense Model Test", optimizer=optimizer)
     # (0) 초기 희소 모델 생성(ER/ERK)
     masks = apply_prune(model, device, args)
     enforce_weight_mask(model, masks)
+    print_prune(model, args)
 
 
     # 사이클 반복
@@ -403,6 +473,7 @@ def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_o
         masks = admm_prune_stage(args, model, device, train_loader, test_loader, masks,
                                  optimizer, epochs=args.grow_interval, cycle=c + 1,
                                  grad_buffers=grad_buf)
+        combined_scheduler.step()
 
     print('[RigL+ADMM] Final fixed-mask retraining...')
 
@@ -414,12 +485,85 @@ def rigl_admm_cycle_train(args, model, device, train_loader, test_loader, base_o
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
             output = model(data)
-            loss = F.nll_loss(output, target)
+            if args.dataset == "imagenet":
+                loss = F.cross_entropy(output, target)
+            else:
+                loss = F.nll_loss(output, target)
             loss.backward()
             mask_grads(model, masks)     # pruned 고정
             optimizer.step()
             enforce_weight_mask(model, masks)
-        testAndSave(args, model, device, test_loader, "ADMM-Re-Training", epoch)
+        combined_scheduler.step()
+        testAndSave(args, model, device, test_loader, "ADMM-Re-Training", epoch, optimizer=optimizer)
+
+    print_prune(model, args)
+    return masks
+
+
+
+# ==============================================================
+# ADMM + RigL 점진적 학습 파이프라인 (Pruning -> Growing)
+# ==============================================================
+def rigl_admm_cycle_train_chore(args, model, device, train_loader, test_loader, base_optimizer_cls):
+    optimizer = base_optimizer_cls(model.named_parameters(), lr=args.lr, eps=args.adam_epsilon)
+    main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_cycles)
+    retrain_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_re_epochs)
+    combined_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[main_scheduler, retrain_scheduler], milestones=[args.num_cycles])
+    grad_buf = {}
+    testAndSave(args, model, device, test_loader, "Dense Model Test", optimizer=optimizer)
+
+    initial_target_sparsities = args.percent.copy()
+    target_retained_ratios = [1.0 - T for T in initial_target_sparsities] 
+    
+    alphas = []
+    betas = []
+    for T_retained in target_retained_ratios:
+        # T_retained: 최종 남길 가중치 비율
+        alpha = find_alpha_for_t(T_retained, args.num_cycles, args.c) 
+        alphas.append(alpha)
+        betas.append(alpha * args.c)
+    current_retained_ratios = [1.0] * len(target_retained_ratios) 
+    args.percent = [0.0] * len(initial_target_sparsities) 
+    masks = apply_prune(model, device, args)
+    for c in range(args.num_cycles):
+        print(f'[RigL+ADMM] Cycle {c+1}/{args.num_cycles}')
+        for i in range(len(current_retained_ratios)):
+            current_retained_ratios[i] *= (1.0 - alphas[i])
+
+        current_target_sparsities = [1.0 - ratio for ratio in current_retained_ratios]
+        args.percent = current_target_sparsities 
+
+        masks = admm_prune_stage(args, model, device, train_loader, test_loader, masks,
+                                 optimizer, epochs=args.grow_interval, cycle=c + 1,
+                                 grad_buffers=grad_buf)
+        if c < args.num_cycles - 1:
+            for i in range(len(current_retained_ratios)):
+                current_retained_ratios[i] *= (1.0 + betas[i])
+            grow_frac_list = [beta for beta in betas]
+            masks = rigl_grow_once_chore_layer_wise(model, masks, grow_fracs_list=grow_frac_list, grad_buffers=grad_buf)
+        grad_buf = {}
+        combined_scheduler.step()
+    args.percent = initial_target_sparsities 
+    print('[RigL+ADMM] Final fixed-mask retraining...')
+
+    # (4) 최종 재학습(마스크 고정, 성장/프루닝 없음)
+    for epoch in range(args.num_re_epochs):
+        print(f'[RigL+ADMM] Re epoch: {epoch+1}/{args.num_re_epochs}')
+        model.train()
+        for batch_idx, (data, target) in enumerate(tqdm(train_loader)):
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+            output = model(data)
+            if args.dataset == "imagenet":
+                loss = F.cross_entropy(output, target)
+            else:
+                loss = F.nll_loss(output, target)
+            loss.backward()
+            mask_grads(model, masks)     # pruned 고정
+            optimizer.step()
+            enforce_weight_mask(model, masks)
+        combined_scheduler.step()
+        testAndSave(args, model, device, test_loader, "ADMM-Re-Training", epoch, optimizer=optimizer)
 
     print_prune(model, args)
     return masks
@@ -473,6 +617,9 @@ def main():
     # Online 계산 사용시 무효화
     parser.add_argument('--grow-grad-steps', type=int, default=50)
 
+    # 점진적 Cycle 학슴 (Pruning -> Growing)
+    parser.add_argument('--c', type=float, default=0.5) 
+
     args = parser.parse_args()
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
@@ -497,7 +644,7 @@ def main():
                            ])),
             batch_size=args.test_batch_size, shuffle=True, **kwargs)
     elif args.dataset == "imagenet":
-        data_dir = "C:\\Users\\gicht\\Downloads"
+        data_dir = "/mnt/sdb1"
 
         train_transform = transforms.Compose([
             transforms.RandomResizedCrop(224),    # 랜덤 크롭 후 224x224로 리사이즈
@@ -519,8 +666,8 @@ def main():
                 ])
         
         # train & val dataset
-        train_dataset = datasets.ImageFolder(root=f"{data_dir}\\ILSVRC2012_img_train", transform=train_transform)
-        test_dataset  = datasets.ImageFolder(root=f"{data_dir}\\ILSVRC2012_img_val",   transform=test_transform)
+        train_dataset = datasets.ImageFolder(root=f"{data_dir}/ILSVRC2012_img_train", transform=train_transform)
+        test_dataset  = datasets.ImageFolder(root=f"{data_dir}/ILSVRC2012_img_val",   transform=test_transform)
 
         # DataLoader
         train_loader = torch.utils.data.DataLoader(
@@ -552,7 +699,7 @@ def main():
                              ])), shuffle=True, batch_size=args.test_batch_size, **kwargs)
 
     if args.dataset == "imagenet":
-        model = models.resnet18(pretrained=True).to(device)
+        model = models.resnet50(pretrained=True).to(device)
     else:
         model = LeNet().to(device) if args.dataset == "mnist" else AlexNet().to(device)
     BaseOpt = PruneAdam
@@ -565,7 +712,8 @@ def main():
         else:
             args.percent = get_pruning_sparsities_uniform(model, args)
         print(args.percent)
-        rigl_admm_cycle_train(args, model, device, train_loader, test_loader, BaseOpt)
+        rigl_admm_cycle_train_chore(args, model, device, train_loader, test_loader, BaseOpt)
+        # rigl_admm_cycle_train(args, model, device, train_loader, test_loader, BaseOpt)
     else:
         optimizer = BaseOpt(model.named_parameters(), lr=args.lr, eps=args.adam_epsilon)
         train_admm_full(args, model, device, train_loader, test_loader, optimizer)
