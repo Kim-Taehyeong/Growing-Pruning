@@ -4,7 +4,8 @@ import torch
 from utils.loader import load_dataset, load_model, load_optimizer
 from methology.admm import admm
 from methology.GPadmm import gpadmm
-from utils.experiment import setup_experiment
+from utils.experiment import setup_experiment, redirect_output_to_log, finish_live_eta
+from model.pretrain import pretrain
 
 
 def main():
@@ -17,6 +18,8 @@ def main():
     parser.add_argument('--run-name', type=str, default="", help='Optional run name. If empty, generated automatically')
     parser.add_argument('--save-checkpoint-every', type=int, default=1,
                         help='Save checkpoint every N epochs (global epoch). Use 0 to disable')
+    parser.add_argument('--eta-update-interval', type=float, default=1.0,
+                        help='Terminal ETA refresh interval in seconds')
 
     # Model
     parser.add_argument('--model', type=str, default="lenet", choices=["lenet", "alexnet", "resnet50"], metavar='M')
@@ -51,13 +54,12 @@ def main():
                         help='enable Grow (RigL) -> ADMM pruning cycles')
     parser.add_argument('--sparsity', type=float, default=0.99, help='global target sparsity (0~1)')
     parser.add_argument('--sparsity-method', type=str, default='uniform', choices=['erk', 'er', 'uniform'])
+    parser.add_argument('--min-layer-keep-ratio', type=float, default=0.01,
+                        help='minimum kept ratio per prunable layer during global pruning')
 
     # RigL + ADMM Epoch 설정 파라미터
     parser.add_argument('--num-cycles', type=int, default=3)
     parser.add_argument('--grow-interval', type=int, default=5)
-
-    # Grow 단계 관련 파라미터
-    parser.add_argument('--grow-frac', type=float, default=0.1)
 
     # Online 계산 사용시 무효화
     parser.add_argument('--grow-grad-steps', type=int, default=50)
@@ -86,11 +88,28 @@ def main():
 
     # 실험 로그/체크포인트 저장 경로 초기화
     setup_experiment(args)
+    redirect_output_to_log(args)
 
-    if args.use_rigl_admm:
-        gpadmm(args, model, device, train_loader, test_loader, base_optimizer_cls)
-    else: # 기존 ADMM 파이프 라인
-        admm(args, model, device, train_loader, test_loader, base_optimizer_cls)
+    # Pretrain Phase: 공통 사전학습(ADMM/GPADMM 모두 적용)
+    if args.num_pre_epochs > 0:
+        model = pretrain(
+            args,
+            kwargs,
+            model,
+            device,
+            train_loader,
+            test_loader,
+            base_optimizer_cls,
+            total_epochs=args.num_pre_epochs + args.num_epochs + args.num_re_epochs,
+        )
+
+    try:
+        if args.use_rigl_admm:
+            gpadmm(args, model, device, train_loader, test_loader, base_optimizer_cls)
+        else: # 기존 ADMM 파이프 라인
+            admm(args, model, device, train_loader, test_loader, base_optimizer_cls)
+    finally:
+        finish_live_eta(args)
 
 if __name__ == "__main__":
     main()

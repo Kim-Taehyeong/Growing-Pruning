@@ -1,13 +1,13 @@
 from utils.sparsity import get_pruning_sparsities_erk, get_pruning_sparsities_uniform
 import torch
 import torch.nn.functional as F
-from tqdm import tqdm
+import time
 from utils.utils import print_prune, apply_prune, testAndSave, \
 find_alpha_for_t, apply_l1_prune, initialize_Z_and_U, admm_penalty_loss, \
 online_accumulate_grad_ema, mask_grads, enforce_weight_mask, update_X, \
 update_Z_l1, update_Z, update_U, print_convergence, rigl_grow_once_global, \
 rebuild_masks_from_weights, apply_global_prune, update_Z_global
-from utils.experiment import log_epoch_eta, save_checkpoint, save_final_model
+from utils.experiment import save_checkpoint, save_final_model, update_live_eta
 
 def gpadmm(args, model, device, train_loader, test_loader, optimizer):
     # 사전 Sparsity 계산 방법 처리
@@ -55,15 +55,15 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
     alpha = find_alpha_for_t(T, N, C)
     beta = alpha * C
 
-    # Pruning 시작
-    masks = apply_global_prune(model, device, args)
- 
+    # 시작 시점에는 프루닝하지 않고, 각 사이클 목표 희소도에 따라 점진적으로 프루닝
+    masks = rebuild_masks_from_weights(model, device=device)
 
     for c in range(args.num_cycles):
         print(f'[RigL+ADMM] Cycle {c+1}/{args.num_cycles}')
 
         current_retained_ratio *= (1.0 - alpha)
         args.global_target_sparsity = 1.0 - current_retained_ratio   
+        print(f"[RigL+ADMM] target global sparsity this cycle: {args.global_target_sparsity:.4f}")
 
         masks = apply_global_prune(model, device, args)
         masks, Z = _admm_prune_stage(args, model, device, train_loader, test_loader, masks,
@@ -85,7 +85,8 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
         print(f'[RigL+ADMM] Re epoch: {epoch+1}/{args.num_re_epochs}')
         model.train()
         running_loss = 0.0
-        for batch_idx, (data, target) in enumerate(tqdm(train_loader)):
+        num_batches = max(len(train_loader), 1)
+        for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
             output = model(data)
@@ -98,8 +99,15 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
             mask_grads(model, masks)     # pruned 고정
             optimizer.step()
             enforce_weight_mask(model, masks)
+
+            completed = global_epoch + float(batch_idx + 1) / float(num_batches)
+            update_live_eta(args, completed, total_epochs, stage="gpadmm-retrain")
         global_epoch += 1
-        elapsed, eta = log_epoch_eta(args.experiment["started_at"], global_epoch, total_epochs, "GPADMM-Re")
+        elapsed = time.time() - args.experiment["started_at"]
+        eta = 0.0
+        if global_epoch > 0:
+            eta = (elapsed / global_epoch) * max(total_epochs - global_epoch, 0)
+        update_live_eta(args, global_epoch, total_epochs, stage="gpadmm-retrain")
         args._extra_metrics = {
             "train_loss": running_loss / max(len(train_loader), 1),
             "global_epoch": global_epoch,
@@ -127,7 +135,8 @@ def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, opt
         print(f'[RigL+ADMM] ADMM epoch {epoch+1}/{epochs}')
         model.train()
         running_loss = 0.0
-        for batch_idx, (data, target) in enumerate(tqdm(train_loader)):
+        num_batches = max(len(train_loader), 1)
+        for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
             output = model(data)
@@ -146,14 +155,20 @@ def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, opt
             optimizer.step()
             enforce_weight_mask(model, masks)
 
+            completed = global_epoch + epoch + float(batch_idx + 1) / float(num_batches)
+            update_live_eta(args, completed, total_epochs, stage=f"gpadmm-cycle-{cycle}")
+
         # ADMM 업데이트(에폭 말)
         X = update_X(model)
         Z = update_Z_global(X, U, args)
         U = update_U(U, X, Z)
         print_convergence(model, X, Z)
         current_global_epoch = global_epoch + epoch + 1
-        elapsed, eta = log_epoch_eta(args.experiment["started_at"], current_global_epoch, total_epochs,
-                                     f"GPADMM-C{cycle}")
+        elapsed = time.time() - args.experiment["started_at"]
+        eta = 0.0
+        if current_global_epoch > 0:
+            eta = (elapsed / current_global_epoch) * max(total_epochs - current_global_epoch, 0)
+        update_live_eta(args, current_global_epoch, total_epochs, stage=f"gpadmm-cycle-{cycle}")
         args._extra_metrics = {
             "train_loss": running_loss / max(len(train_loader), 1),
             "global_epoch": current_global_epoch,

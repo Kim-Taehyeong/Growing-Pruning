@@ -25,6 +25,15 @@ GPADMM_JOBS=(
   "$PYTHON_BIN main.py --dataset cifar10 --model alexnet --use-rigl-admm --sparsity-method uniform --sparsity 0.95 --num-cycles 4 --grow-interval 10 --grow-frac 0.10 --num_re_epochs 5 --num_pre_epochs 5 --lr 1e-3 --output-dir $OUT_ROOT/gpadmm_cifar10_u.jsonl"
 )
 
+format_hms() {
+  local secs=$1
+  if (( secs < 0 )); then secs=0; fi
+  local h=$((secs / 3600))
+  local m=$(((secs % 3600) / 60))
+  local s=$((secs % 60))
+  printf "%02d:%02d:%02d" "$h" "$m" "$s"
+}
+
 run_jobs() {
   local tag=$1
   shift
@@ -32,10 +41,19 @@ run_jobs() {
 
   local i=0
   local total=${#jobs[@]}
+  local batch_start=$(date +%s)
   for cmd in "${jobs[@]}"; do
     i=$((i + 1))
+    local run_start=$(date +%s)
     echo "[$tag] (${i}/${total}) $cmd"
     eval "$cmd"
+    local run_end=$(date +%s)
+
+    local elapsed=$((run_end - batch_start))
+    local avg=$((elapsed / i))
+    local eta=$((avg * (total - i)))
+    echo "[$tag ETA] elapsed=$(format_hms "$elapsed") avg/job=$(format_hms "$avg") eta=$(format_hms "$eta")"
+    echo
   done
 }
 

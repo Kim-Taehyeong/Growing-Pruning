@@ -237,9 +237,24 @@ def apply_global_prune(model, device, args):
     else:
         threshold = -1.0
 
+    # 전역 프루닝 후 특정 레이어가 전부 0이 되는 것을 방지
+    min_keep_ratio = float(getattr(args, "min_layer_keep_ratio", 0.0))
+
     for name, param in model.named_parameters():
         if name.split('.')[-1] == "weight" and param.dim() >= 2:
             mask = (param.data.abs() > threshold).float().to(device)
+
+            if min_keep_ratio > 0.0:
+                keep_count = int(mask.sum().item())
+                min_keep = max(1, int(param.numel() * min_keep_ratio))
+                min_keep = min(min_keep, param.numel())
+                if keep_count < min_keep:
+                    flat_abs = param.data.abs().view(-1)
+                    topk_idx = torch.topk(flat_abs, k=min_keep, largest=True, sorted=False).indices
+                    flat_mask = torch.zeros_like(flat_abs, device=device)
+                    flat_mask[topk_idx] = 1.0
+                    mask = flat_mask.view_as(param)
+
             param.data.mul_(mask)
             dict_mask[name] = mask
 
@@ -282,7 +297,13 @@ def print_convergence(model, X, Z):
     for name, param in model.named_parameters():
         if name.split('.')[-1] == "weight" and param.dim() >= 2:
             x, z = X[idx], Z[idx]
-            print("({}): {:.4f}".format(name, (x-z).norm().item() / x.norm().item()))
+            num = (x - z).norm().item()
+            den = x.norm().item()
+            if den <= 1e-12:
+                ratio = 0.0 if num <= 1e-12 else float("inf")
+            else:
+                ratio = num / den
+            print("({}): {:.4f}".format(name, ratio))
             idx += 1
 
 
@@ -411,7 +432,33 @@ def _to_json_serializable(obj):
         return {str(k): _to_json_serializable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set)):
         return [_to_json_serializable(v) for v in obj]
+    # Fallback for arbitrary runtime objects (e.g., file handles)
+    if hasattr(obj, "__dict__"):
+        return str(obj)
     return obj
+
+
+def _format_hms(seconds):
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _safe_args_dict(args):
+    if args is None:
+        return {}
+
+    raw = vars(args)
+    safe = {}
+    for key, value in raw.items():
+        # runtime/private 필드는 메트릭 JSON에서 제외
+        if key.startswith("_"):
+            continue
+        if key == "experiment":
+            continue
+        safe[key] = _to_json_serializable(value)
+    return safe
 
 def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=None):
     """
@@ -508,7 +555,7 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=
         "nonzero_params_M": nonzero_params.item() / 1e6,
         "gflops": gflops,
         "lr": current_lr,
-        "args": vars(args) if args is not None else {}
+        "args": _safe_args_dict(args)
     }
 
     extra_metrics = getattr(args, "_extra_metrics", None)
@@ -520,14 +567,20 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=
     with open(json_file, mode="a", encoding="utf-8") as f:
         f.write(json.dumps(_to_json_serializable(metrics)) + "\n")
 
-    # --- 출력 포맷 수정 ---
-    print(f"[{prefix}] Epoch {metrics['epoch']} | "
-          f"Params(M): {metrics['nonzero_params_M']:.2f}/{metrics['total_params_M']:.2f} | "
-          f"GFLOPs: {metrics['gflops']:.2f} | "
-          f"Loss {test_loss:.4f}, Top1 {acc1:.2f}%, Top5 {acc5:.2f}%, "
-          f"P {precision:.3f}, R {recall:.3f}, F1 {f1:.3f} | "
-          f"LR {current_lr}"
-    )
+        elapsed_sec = metrics.get("elapsed_sec")
+        eta_sec = metrics.get("eta_sec")
+        time_part = ""
+        if elapsed_sec is not None and eta_sec is not None:
+          time_part = f" | Elapsed {_format_hms(elapsed_sec)} ETA {_format_hms(eta_sec)}"
+
+        # --- 출력 포맷 수정 ---
+        print(f"[{prefix}] Epoch {metrics['epoch']} | "
+            f"Params(M): {metrics['nonzero_params_M']:.2f}/{metrics['total_params_M']:.2f} | "
+            f"GFLOPs: {metrics['gflops']:.2f} | "
+            f"Loss {test_loss:.4f}, Top1 {acc1:.2f}%, Top5 {acc5:.2f}%, "
+            f"P {precision:.3f}, R {recall:.3f}, F1 {f1:.3f} | "
+            f"LR {current_lr}{time_part}"
+        )
 
     return metrics
 
@@ -599,26 +652,27 @@ def rigl_grow_once_global(model, masks, global_grow_frac, grad_buffers):
     if k <= 0:
         return masks
     
-    vals, topk_global_indices = torch.topk(all_grads_tensor, k=k, largest=True, sorted=False)
+    _, topk_global_indices = torch.topk(all_grads_tensor, k=k, largest=True, sorted=False)
 
     lengths = [len(g) for g in all_pruned_grads]
     cum_lengths = torch.cumsum(torch.tensor([0] + lengths), dim=0)
 
     params_dict = dict(model.named_parameters())
 
-    for i in range(len(location_map)):
-        name, pruned_indices = location_map[i]
-        start_idx = cum_lengths[i]
-        end_idx = cum_lengths[i + 1]
+    with torch.no_grad():
+        for i in range(len(location_map)):
+            name, pruned_indices = location_map[i]
+            start_idx = cum_lengths[i]
+            end_idx = cum_lengths[i + 1]
 
-        mask_in_this_layer = (topk_global_indices >= start_idx) & (topk_global_indices < end_idx)
-        local_topk_indices = topk_global_indices[mask_in_this_layer] - start_idx
+            mask_in_this_layer = (topk_global_indices >= start_idx) & (topk_global_indices < end_idx)
+            local_topk_indices = topk_global_indices[mask_in_this_layer] - start_idx
 
-        if local_topk_indices.numel() > 0:
-            actual_grow_indices = pruned_indices[local_topk_indices]
-            masks[name].view(-1).index_fill_(0, actual_grow_indices, 1.0)
+            if local_topk_indices.numel() > 0:
+                actual_grow_indices = pruned_indices[local_topk_indices]
+                masks[name].view(-1).index_fill_(0, actual_grow_indices, 1.0)
 
-            params_dict[name].view(-1).index_fill_(0, actual_grow_indices, 0.0)
+                params_dict[name].view(-1).index_fill_(0, actual_grow_indices, 0.0)
 
     enforce_weight_mask(model, masks)
     return masks

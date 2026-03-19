@@ -1,4 +1,6 @@
 import time
+import sys
+import atexit
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +31,7 @@ def setup_experiment(args):
         "base_dir": str(base_dir),
         "checkpoints_dir": str(ckpt_dir),
         "models_dir": str(model_dir),
+        "log_file": str(base_dir / "run.log"),
         "started_at": time.time(),
     }
     args.experiment = exp
@@ -40,6 +43,74 @@ def _format_duration(seconds):
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def redirect_output_to_log(args):
+    """Redirect stdout/stderr to run.log; keep original stdout for live ETA line."""
+    exp = args.experiment
+    log_fp = open(exp["log_file"], "a", encoding="utf-8", buffering=1)
+
+    exp["_orig_stdout"] = sys.stdout
+    exp["_orig_stderr"] = sys.stderr
+    exp["_console_stream"] = sys.__stdout__
+    exp["_log_fp"] = log_fp
+
+    sys.stdout = log_fp
+    sys.stderr = log_fp
+
+    def _cleanup():
+        try:
+            finish_live_eta(args)
+        except Exception:
+            pass
+        try:
+            sys.stdout = exp.get("_orig_stdout", sys.__stdout__)
+            sys.stderr = exp.get("_orig_stderr", sys.__stderr__)
+        except Exception:
+            pass
+        try:
+            fp = exp.get("_log_fp")
+            if fp and not fp.closed:
+                fp.flush()
+                fp.close()
+        except Exception:
+            pass
+
+    atexit.register(_cleanup)
+
+
+def update_live_eta(args, completed_epochs, total_epochs, stage="train"):
+    min_interval = float(getattr(args, "eta_update_interval", 1.0))
+    now = time.time()
+    last = float(args.experiment.get("_eta_last_ts", 0.0))
+    if (now - last) < min_interval:
+        # Too soon to refresh terminal line; still return current estimate.
+        elapsed = now - args.experiment["started_at"]
+        eta = 0.0
+        if completed_epochs > 0:
+            eta = (elapsed / completed_epochs) * max(total_epochs - completed_epochs, 0)
+        return elapsed, eta
+
+    args.experiment["_eta_last_ts"] = now
+    elapsed = time.time() - args.experiment["started_at"]
+    eta = 0.0
+    if completed_epochs > 0:
+        eta = (elapsed / completed_epochs) * max(total_epochs - completed_epochs, 0)
+
+    line = (
+        f"\r[ETA] {stage} | {completed_epochs}/{total_epochs} | "
+        f"elapsed {_format_duration(elapsed)} | eta {_format_duration(eta)}"
+    )
+    console = args.experiment.get("_console_stream", sys.__stdout__)
+    console.write(line)
+    console.flush()
+    return elapsed, eta
+
+
+def finish_live_eta(args):
+    console = args.experiment.get("_console_stream", sys.__stdout__)
+    console.write("\n")
+    console.flush()
 
 
 def log_epoch_eta(start_time, completed_epochs, total_epochs, prefix):
