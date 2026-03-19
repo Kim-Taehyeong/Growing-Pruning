@@ -352,14 +352,14 @@ def _count_sparse_flops(model, sample_input):
     NOTE: 이 계산은 근사치이며, 모든 종류의 레이어를 지원하지 않을 수 있습니다.
           주로 Conv2d와 Linear 레이어에 초점을 맞춥니다.
     """
-    total_flops = 0
+    total_flops = 0.0
 
     def multiply_adds_hook(module, input, output):
         nonlocal total_flops
         # torch.nn.Linear
         if isinstance(module, torch.nn.Linear):
             batch_size = input[0].shape[0] if input[0].dim() > 1 else 1
-            nonzero_weights = torch.count_nonzero(module.weight)
+            nonzero_weights = torch.count_nonzero(module.weight).item()
             # 가중치에 대한 곱셈-누산(Multiply-Accumulate) 연산
             macs = nonzero_weights * batch_size
             total_flops += 2 * macs # 1 MAC = 2 FLOPs (곱셈 1, 덧셈 1)
@@ -370,7 +370,7 @@ def _count_sparse_flops(model, sample_input):
         # torch.nn.Conv2d
         elif isinstance(module, torch.nn.Conv2d):
             batch_size, _, output_h, output_w = output.shape
-            nonzero_weights = torch.count_nonzero(module.weight)
+            nonzero_weights = torch.count_nonzero(module.weight).item()
             # 커널의 0이 아닌 가중치에 대한 MACs
             macs = output_h * output_w * (nonzero_weights / module.groups) * batch_size
             total_flops += 2 * macs # 1 MAC = 2 FLOPs
@@ -392,7 +392,26 @@ def _count_sparse_flops(model, sample_input):
     for hook in hooks:
         hook.remove()
 
-    return total_flops
+    return float(total_flops)
+
+
+def _to_json_serializable(obj):
+    if isinstance(obj, torch.Tensor):
+        obj = obj.detach().cpu()
+        return obj.item() if obj.numel() == 1 else obj.tolist()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, torch.device):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {str(k): _to_json_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_json_serializable(v) for v in obj]
+    return obj
 
 def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=None):
     """
@@ -498,8 +517,8 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=
         args._extra_metrics = {}
 
     json_file = Path(args.output_dir)
-    with open(json_file, mode="a") as f:
-        f.write(json.dumps(metrics) + "\n")
+    with open(json_file, mode="a", encoding="utf-8") as f:
+        f.write(json.dumps(_to_json_serializable(metrics)) + "\n")
 
     # --- 출력 포맷 수정 ---
     print(f"[{prefix}] Epoch {metrics['epoch']} | "
