@@ -12,7 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description='PyTorch MNIST/CIFAR with ADMM or RigL+ADMM')
 
     # Dataset
-    parser.add_argument('--dataset', type=str, default="mnist", choices=["mnist", "cifar10", "imagenet"], metavar='D')
+    parser.add_argument('--dataset', type=str, default="mnist", choices=["mnist", "cifar10", "cifar100", "imagenet"], metavar='D')
     parser.add_argument('--output-dir', type=str, default="", metavar='O', help='Directory to save metrics JSON files')
     parser.add_argument('--save-dir', type=str, default="./runs", help='Directory to save checkpoints and final models')
     parser.add_argument('--run-name', type=str, default="", help='Optional run name. If empty, generated automatically')
@@ -22,7 +22,9 @@ def main():
                         help='Terminal ETA refresh interval in seconds')
 
     # Model
-    parser.add_argument('--model', type=str, default="lenet", choices=["lenet", "alexnet", "resnet50"], metavar='M')
+    parser.add_argument('--model', type=str, default="lenet",
+                        choices=["lenet", "alexnet", "resnet20", "resnet18", "resnet50", "vgg19", "mobilenet_v2"],
+                        metavar='M')
 
     # Batches
     parser.add_argument('--batch-size', type=int, default=64, metavar='N')
@@ -83,6 +85,22 @@ def main():
     # 모델 초기화
     model = load_model(args, kwargs).to(device)
 
+    # 모델별 사전학습 정책 강제 적용
+    forced_pre_epochs = {
+        "lenet": 3,
+        "alexnet": 5,
+        "resnet20": 5,
+    }
+
+    if getattr(args, "torch_pretrained_loaded", False):
+        # torchvision pretrained를 사용한 경우 사전학습 스킵
+        args.num_pre_epochs = 0
+        print(f"[Pretrain] Disabled for pretrained model: {args.model}")
+    elif args.model in forced_pre_epochs:
+        # pretrained가 없는 모델은 모델별로 pre-epoch를 강제 설정
+        args.num_pre_epochs = forced_pre_epochs[args.model]
+        print(f"[Pretrain] Forced num_pre_epochs={args.num_pre_epochs} for model: {args.model}")
+
     # Optimizer 초기화
     base_optimizer_cls = load_optimizer(args, kwargs)
 
@@ -90,7 +108,7 @@ def main():
     setup_experiment(args)
     redirect_output_to_log(args)
 
-    # Pretrain Phase: 공통 사전학습(ADMM/GPADMM 모두 적용)
+    # Pretrain Phase
     if args.num_pre_epochs > 0:
         model = pretrain(
             args,

@@ -97,10 +97,17 @@ def update_live_eta(args, completed_epochs, total_epochs, stage="train"):
     if completed_epochs > 0:
         eta = (elapsed / completed_epochs) * max(total_epochs - completed_epochs, 0)
 
+    # 고정 폭 포맷으로 길이 변화(소수점/사이클명)로 인한 잔문자 발생을 최소화
     line = (
-        f"\r[ETA] {stage} | {completed_epochs}/{total_epochs} | "
+        f"\r[ETA] {stage:<18} | "
+        f"{float(completed_epochs):7.2f}/{float(total_epochs):7.2f} | "
         f"elapsed {_format_duration(elapsed)} | eta {_format_duration(eta)}"
     )
+    prev_len = int(args.experiment.get("_eta_prev_len", 0))
+    cur_len = len(line) - 1  # '\r' 제외
+    if prev_len > cur_len:
+        line += " " * (prev_len - cur_len)
+    args.experiment["_eta_prev_len"] = max(prev_len, cur_len)
     console = args.experiment.get("_console_stream", sys.__stdout__)
     console.write(line)
     console.flush()
@@ -109,6 +116,9 @@ def update_live_eta(args, completed_epochs, total_epochs, stage="train"):
 
 def finish_live_eta(args):
     console = args.experiment.get("_console_stream", sys.__stdout__)
+    prev_len = int(args.experiment.get("_eta_prev_len", 0))
+    if prev_len > 0:
+        console.write("\r" + (" " * prev_len) + "\r")
     console.write("\n")
     console.flush()
 
