@@ -55,9 +55,9 @@ GPADMM_JOBS=(
   "$PYTHON_BIN main.py --dataset cifar100 --model resnet18 --use-rigl-admm --sparsity 0.95 --num-cycles 4 --grow-interval 30 --num_re_epochs 15 --lr 5e-5 --output-dir $OUT_ROOT/gp_c100_r18_s95_i30_lr5e5.jsonl"
 
   # [ImageNet/ResNet50] 실제 스케일 테스트 (Interval 5~10)
-  "$PYTHON_BIN main.py --dataset imagenet --model resnet50 --use-rigl-admm --sparsity 0.70 --num-cycles 3 --grow-interval 5 --num_re_epochs 5 --lr 1e-4 --output-dir $OUT_ROOT/gp_img_r50_s70.jsonl --data_dir /home/users/taehyeok/ILSVRC_2012"
-  "$PYTHON_BIN main.py --dataset imagenet --model resnet50 --use-rigl-admm --sparsity 0.80 --num-cycles 3 --grow-interval 8 --num_re_epochs 5 --lr 1e-4 --output-dir $OUT_ROOT/gp_img_r50_s80.jsonl --data_dir /home/users/taehyeok/ILSVRC_2012"
-  "$PYTHON_BIN main.py --dataset imagenet --model resnet50 --use-rigl-admm --sparsity 0.90 --num-cycles 3 --grow-interval 10 --num_re_epochs 5 --lr 5e-5 --output-dir $OUT_ROOT/gp_img_r50_s90_lr5e5.jsonl --data_dir /home/users/taehyeok/ILSVRC_2012"
+  "$PYTHON_BIN main.py --dataset imagenet --model resnet50 --use-rigl-admm --sparsity 0.70 --num-cycles 3 --grow-interval 5 --num_re_epochs 5 --lr 1e-4 --output-dir $OUT_ROOT/gp_img_r50_s70.jsonl --data-dir /home/users/taehyeok/ILSVRC_2012"
+  "$PYTHON_BIN main.py --dataset imagenet --model resnet50 --use-rigl-admm --sparsity 0.80 --num-cycles 3 --grow-interval 8 --num_re_epochs 5 --lr 1e-4 --output-dir $OUT_ROOT/gp_img_r50_s80.jsonl --data-dir /home/users/taehyeok/ILSVRC_2012"
+  "$PYTHON_BIN main.py --dataset imagenet --model resnet50 --use-rigl-admm --sparsity 0.90 --num-cycles 3 --grow-interval 10 --num_re_epochs 5 --lr 5e-5 --output-dir $OUT_ROOT/gp_img_r50_s90_lr5e5.jsonl --data-dir /home/users/taehyeok/ILSVRC_2012"
 )
 
 ALL_JOBS=()
