@@ -146,7 +146,7 @@ def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, opt
             else:
                 task_loss = F.nll_loss(output, target)
             running_loss += task_loss.item()
-            task_loss.backward(retain_graph=True)
+            task_loss.backward()
             online_accumulate_grad_ema(model, grad_buffers, beta=0.95)
 
             penalty_loss = admm_penalty_loss(args, device, model, Z, U)
