@@ -29,7 +29,7 @@ def main():
 
     # Batches
     parser.add_argument('--batch-size', type=int, default=64, metavar='N')
-    parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N')
+    parser.add_argument('--test-batch-size', type=int, default=128, metavar='N')
 
     # 기존 ADMM(풀런) 파라미터
     parser.add_argument('--percent', type=list, default=[0.8, 0.92, 0.991, 0.93], metavar='P',
