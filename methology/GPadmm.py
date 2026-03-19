@@ -118,8 +118,9 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
         }
         combined_scheduler.step()
         metrics = testAndSave(args, model, device, test_loader, "ADMM-Re-Training", epoch, optimizer=optimizer)
-        save_checkpoint(args, model, optimizer, stage="gpadmm_retrain", stage_epoch=epoch + 1,
-                        global_epoch=global_epoch, metrics=metrics)
+        if epoch == args.num_re_epochs - 1:
+            save_checkpoint(args, model, optimizer, stage="gpadmm_retrain_final", stage_epoch=epoch + 1,
+                            global_epoch=global_epoch, metrics=metrics)
 
     print_prune(model, args)
     save_final_model(args, model, optimizer=optimizer, tag="gpadmm_final")
@@ -178,8 +179,6 @@ def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, opt
             "stage": f"cycle-{cycle}-admm",
         }
         metrics = testAndSave(args, model, device, test_loader, f"ADMM-Cycle {cycle}", epoch, optimizer=optimizer)
-        save_checkpoint(args, model, optimizer, stage=f"gpadmm_cycle_{cycle}", stage_epoch=epoch + 1,
-                        global_epoch=current_global_epoch, metrics=metrics)
 
     # 목표 희소도까지 프루닝
     masks = apply_global_prune(model, device, args)
