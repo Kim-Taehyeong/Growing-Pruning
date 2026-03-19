@@ -15,21 +15,21 @@ mkdir -p "$OUT_ROOT"
 # MODE: admm | gpadmm | all
 MODE=${1:-all}
 
-ADMM_JOBS=(
-  # MNIST/LeNet (Extreme Sparsity)
-  "$PYTHON_BIN main.py --dataset mnist --model lenet --sparsity 0.95 --num_epochs 20 --num_re_epochs 5 --lr 1e-3 --output-dir $OUT_ROOT/admm_mnist_s95.jsonl --save-dir $SAVE_ROOT/admm_mnist_s95"
-  "$PYTHON_BIN main.py --dataset mnist --model lenet --sparsity 0.98 --num_epochs 20 --num_re_epochs 5 --lr 1e-3 --output-dir $OUT_ROOT/admm_mnist_s98.jsonl --save-dir $SAVE_ROOT/admm_mnist_s98"
-  "$PYTHON_BIN main.py --dataset mnist --model lenet --sparsity 0.99 --num_epochs 20 --num_re_epochs 5 --lr 1e-3 --output-dir $OUT_ROOT/admm_mnist_s99.jsonl --save-dir $SAVE_ROOT/admm_mnist_s99"
+# ADMM_JOBS=(
+#   # MNIST/LeNet (Extreme Sparsity)
+#   "$PYTHON_BIN main.py --dataset mnist --model lenet --sparsity 0.95 --num_epochs 20 --num_re_epochs 5 --lr 1e-3 --output-dir $OUT_ROOT/admm_mnist_s95.jsonl --save-dir $SAVE_ROOT/admm_mnist_s95"
+#   "$PYTHON_BIN main.py --dataset mnist --model lenet --sparsity 0.98 --num_epochs 20 --num_re_epochs 5 --lr 1e-3 --output-dir $OUT_ROOT/admm_mnist_s98.jsonl --save-dir $SAVE_ROOT/admm_mnist_s98"
+#   "$PYTHON_BIN main.py --dataset mnist --model lenet --sparsity 0.99 --num_epochs 20 --num_re_epochs 5 --lr 1e-3 --output-dir $OUT_ROOT/admm_mnist_s99.jsonl --save-dir $SAVE_ROOT/admm_mnist_s99"
 
-  # CIFAR10/VGG19 (Standard Bench)
-  "$PYTHON_BIN main.py --dataset cifar10 --model vgg19 --sparsity 0.90 --num_epochs 40 --num_re_epochs 10 --lr 1e-3 --output-dir $OUT_ROOT/admm_c10_vgg_s90.jsonl --save-dir $SAVE_ROOT/admm_c10_vgg_s90"
-  "$PYTHON_BIN main.py --dataset cifar10 --model vgg19 --sparsity 0.95 --num_epochs 40 --num_re_epochs 10 --lr 1e-3 --output-dir $OUT_ROOT/admm_c10_vgg_s95.jsonl  --save-dir $SAVE_ROOT/admm_c10_vgg_s95"
-  "$PYTHON_BIN main.py --dataset cifar10 --model vgg19 --sparsity 0.98 --num_epochs 40 --num_re_epochs 10 --lr 1e-3 --output-dir $OUT_ROOT/admm_c10_vgg_s98.jsonl --save-dir $SAVE_ROOT/admm_c10_vgg_s98"
+#   # CIFAR10/VGG19 (Standard Bench)
+#   "$PYTHON_BIN main.py --dataset cifar10 --model vgg19 --sparsity 0.90 --num_epochs 40 --num_re_epochs 10 --lr 1e-3 --output-dir $OUT_ROOT/admm_c10_vgg_s90.jsonl --save-dir $SAVE_ROOT/admm_c10_vgg_s90"
+#   "$PYTHON_BIN main.py --dataset cifar10 --model vgg19 --sparsity 0.95 --num_epochs 40 --num_re_epochs 10 --lr 1e-3 --output-dir $OUT_ROOT/admm_c10_vgg_s95.jsonl  --save-dir $SAVE_ROOT/admm_c10_vgg_s95"
+#   "$PYTHON_BIN main.py --dataset cifar10 --model vgg19 --sparsity 0.98 --num_epochs 40 --num_re_epochs 10 --lr 1e-3 --output-dir $OUT_ROOT/admm_c10_vgg_s98.jsonl --save-dir $SAVE_ROOT/admm_c10_vgg_s98"
 
-  # CIFAR10/ResNet20 (Residual Connection)
-  "$PYTHON_BIN main.py --dataset cifar10 --model resnet20 --sparsity 0.90 --num_epochs 40 --num_re_epochs 10 --lr 5e-4 --output-dir $OUT_ROOT/admm_c10_r20_s90.jsonl --save-dir $SAVE_ROOT/admm_c10_r20_s90"
-  "$PYTHON_BIN main.py --dataset cifar10 --model resnet20 --sparsity 0.95 --num_epochs 40 --num_re_epochs 10 --lr 5e-4 --output-dir $OUT_ROOT/admm_c10_r20_s95.jsonl --save-dir $SAVE_ROOT/admm_c10_r20_s95"
-)
+#   # CIFAR10/ResNet20 (Residual Connection)
+#   "$PYTHON_BIN main.py --dataset cifar10 --model resnet20 --sparsity 0.90 --num_epochs 40 --num_re_epochs 10 --lr 5e-4 --output-dir $OUT_ROOT/admm_c10_r20_s90.jsonl --save-dir $SAVE_ROOT/admm_c10_r20_s90"
+#   "$PYTHON_BIN main.py --dataset cifar10 --model resnet20 --sparsity 0.95 --num_epochs 40 --num_re_epochs 10 --lr 5e-4 --output-dir $OUT_ROOT/admm_c10_r20_s95.jsonl --save-dir $SAVE_ROOT/admm_c10_r20_s95"
+# )
 
 # ---------------------------------------------------------
 # 2. GPADMM (Proposed: RigL + ADMM)
