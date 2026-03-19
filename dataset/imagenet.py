@@ -26,12 +26,18 @@ def load_imagenet(args, kwargs):
     train_dataset = datasets.ImageFolder(root=f"{args.data_dir}/ILSVRC2012_img_train", transform=train_transform)
     test_dataset  = datasets.ImageFolder(root=f"{args.data_dir}/ILSVRC2012_img_val",   transform=test_transform)
 
-    # DataLoader
+    # DataLoader: main.py의 batch-size/worker/pin_memory 설정을 그대로 사용
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=128, shuffle=True, num_workers=8, pin_memory=True
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        **kwargs,
     )
     test_loader = torch.utils.data.DataLoader(
-        test_dataset, batch_size=128, shuffle=False, num_workers=8, pin_memory=True
+        test_dataset,
+        batch_size=args.test_batch_size,
+        shuffle=False,
+        **kwargs,
     )
 
     return train_loader, test_loader
