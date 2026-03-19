@@ -16,6 +16,7 @@ def main():
     parser.add_argument('--output-dir', type=str, default="", metavar='O', help='Directory to save metrics JSON files')
     parser.add_argument('--save-dir', type=str, default="./runs", help='Directory to save checkpoints and final models')
     parser.add_argument('--run-name', type=str, default="", help='Optional run name. If empty, generated automatically')
+    parser.add_argument('--data-dir', type=str, default="./data", help='Directory to download/load datasets (default: ./data)')
     parser.add_argument('--save-checkpoint-every', type=int, default=1,
                         help='Save checkpoint every N epochs (global epoch). Use 0 to disable')
     parser.add_argument('--eta-update-interval', type=float, default=1.0,
