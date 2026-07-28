@@ -1,0 +1,28 @@
+method: admm
+
+common:
+  dataset: cifar10
+  model: resnet56
+  cifar_pretrained: true
+  min_dense_acc: 20.0
+  seed: 1
+  device: auto
+  batch_size: 64
+  test_batch_size: 128
+  data_dir: ./data
+  output_dir: ./output/admm_cifar10_resnet56_pretrained_smoke.jsonl
+  save_dir: ./runs/admm_cifar10_resnet56_pretrained_smoke
+  optimizer: adam
+  lr: 0.001
+  adam_epsilon: 1e-8
+  rho: 0.01
+  alpha: 5e-4
+  l1: false
+  l2: false
+  num_pre_epochs: 0
+  save_checkpoint_every: 1
+
+admm:
+  sparsity: 0.95
+  num_epochs: 2
+  num_re_epochs: 1

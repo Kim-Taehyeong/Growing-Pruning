@@ -10,17 +10,47 @@ rebuild_masks_from_weights, apply_global_prune, update_Z_global
 from utils.experiment import save_checkpoint, save_final_model, update_live_eta
 
 def gpadmm(args, model, device, train_loader, test_loader, optimizer):
-    # 사전 Sparsity 계산 방법 처리
-    if args.sparsity_method == 'erk':
-        args.percent = get_pruning_sparsities_erk(model, args)
-    elif args.sparsity_method == 'er':
-        args.percent = get_pruning_sparsities_erk(model, args, include_kernel=False)
-    elif args.sparsity_method == 'uniform':
-        args.percent = get_pruning_sparsities_uniform(model, args)
-    else:
-        # Sparsity 방법이 지정되지 않은 경우, Automation 모드로 설정
-        args.percent = None
+    if _use_layerwise_pruning(args):
+        args.gpadmm_final_percent = _compute_gpadmm_final_percent(args, model)
+        args.percent = list(args.gpadmm_final_percent)
+        _print_layerwise_targets(args, model, args.gpadmm_final_percent, label="final")
     _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader, optimizer)
+
+
+def _use_layerwise_pruning(args):
+    return getattr(args, "gpadmm_prune_scope", "global") == "layerwise"
+
+
+def _compute_gpadmm_final_percent(args, model):
+    method = getattr(args, "sparsity_method", "uniform")
+    if method == 'erk':
+        return get_pruning_sparsities_erk(model, args)
+    if method == 'er':
+        return get_pruning_sparsities_erk(model, args, include_kernel=False)
+    if method == 'uniform':
+        return get_pruning_sparsities_uniform(model, args)
+    raise ValueError(f"Unsupported GP-ADMM sparsity_method: {method}")
+
+
+def _prunable_layer_names(model):
+    return [
+        name for name, param in model.named_parameters()
+        if name.split('.')[-1] == "weight" and param.dim() >= 2
+    ]
+
+
+def _set_cycle_layerwise_percent(args, model, cycle_target_sparsity):
+    final_percent = list(getattr(args, "gpadmm_final_percent", None) or _compute_gpadmm_final_percent(args, model))
+    final_global = max(float(getattr(args, "sparsity", 0.0)), 1e-12)
+    progress = min(1.0, max(0.0, float(cycle_target_sparsity) / final_global))
+    args.percent = [min(0.9999, max(0.0, float(p) * progress)) for p in final_percent]
+    _print_layerwise_targets(args, model, args.percent, label=f"cycle target {cycle_target_sparsity:.4f}")
+
+
+def _print_layerwise_targets(args, model, percents, label):
+    print(f"[RigL+ADMM] {args.sparsity_method} layer-wise sparsity targets ({label})")
+    for name, percent in zip(_prunable_layer_names(model), percents):
+        print(f"  - {name}: {float(percent):.4f}")
 
 
 def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader, base_optimizer_cls):
@@ -39,10 +69,6 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
     grad_buf = {}
     total_epochs = args.num_cycles * args.grow_interval + args.num_re_epochs
     global_epoch = 0
-    args._extra_metrics = {"global_epoch": global_epoch, "total_epochs": total_epochs, "stage": "dense-eval"}
-    dense_metrics = testAndSave(args, model, device, test_loader, "Dense Model Test", optimizer=optimizer)
-    save_checkpoint(args, model, optimizer, stage="gpadmm_dense", stage_epoch=0,
-                    global_epoch=1, metrics=dense_metrics)
 
     # 초기 타겟 희소성과 남길 가중치 비율 계산
     T = 1.0 - args.sparsity
@@ -62,10 +88,15 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
         print(f'[RigL+ADMM] Cycle {c+1}/{args.num_cycles}')
 
         current_retained_ratio *= (1.0 - alpha)
-        args.global_target_sparsity = 1.0 - current_retained_ratio   
-        print(f"[RigL+ADMM] target global sparsity this cycle: {args.global_target_sparsity:.4f}")
+        cycle_target_sparsity = 1.0 - current_retained_ratio
+        args.global_target_sparsity = cycle_target_sparsity
+        print(f"[RigL+ADMM] target global sparsity this cycle: {cycle_target_sparsity:.4f}")
 
-        masks = apply_global_prune(model, device, args)
+        if _use_layerwise_pruning(args):
+            _set_cycle_layerwise_percent(args, model, cycle_target_sparsity)
+            masks = apply_l1_prune(model, device, args) if args.l1 else apply_prune(model, device, args)
+        else:
+            masks = apply_global_prune(model, device, args)
         masks, Z = _admm_prune_stage(args, model, device, train_loader, test_loader, masks,
                                  optimizer, epochs=args.grow_interval, cycle=c + 1,
                                  grad_buffers=grad_buf, Z_input=Z,
@@ -77,7 +108,9 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
         grad_buf = {}
         combined_scheduler.step()
     
-    args.global_target_sparsity = T
+    args.global_target_sparsity = float(getattr(args, "sparsity", 0.0))
+    if _use_layerwise_pruning(args):
+        args.percent = list(args.gpadmm_final_percent)
     print('[RigL+ADMM] Final fixed-mask retraining...')
 
     # (4) 최종 재학습(마스크 고정, 성장/프루닝 없음)
@@ -161,7 +194,10 @@ def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, opt
 
         # ADMM 업데이트(에폭 말)
         X = update_X(model)
-        Z = update_Z_global(X, U, args)
+        if _use_layerwise_pruning(args):
+            Z = update_Z_l1(X, U, args) if args.l1 else update_Z(X, U, args)
+        else:
+            Z = update_Z_global(X, U, args)
         U = update_U(U, X, Z)
         print_convergence(model, X, Z)
         current_global_epoch = global_epoch + epoch + 1
@@ -181,7 +217,10 @@ def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, opt
         metrics = testAndSave(args, model, device, test_loader, f"ADMM-Cycle {cycle}", epoch, optimizer=optimizer)
 
     # 목표 희소도까지 프루닝
-    masks = apply_global_prune(model, device, args)
+    if _use_layerwise_pruning(args):
+        masks = apply_l1_prune(model, device, args) if args.l1 else apply_prune(model, device, args)
+    else:
+        masks = apply_global_prune(model, device, args)
 
     # 프루닝 후 모델에서 새 마스크 복원 (다음 사이클에 사용)
     new_masks = rebuild_masks_from_weights(model, device=device)

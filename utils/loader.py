@@ -1,9 +1,10 @@
 import torch.nn as nn
 import torch.nn.functional as F
+import torch
 import torchvision.models as models
 
-from model.model import LeNet, AlexNet, ResNet20
-from model.optimizer import PruneAdam
+from model.model import LeNet, AlexNet, ResNet20, ResNet56
+from model.optimizer import PruneAdam, PruneSGD
 
 
 class LogSoftmaxWrapper(nn.Module):
@@ -13,6 +14,37 @@ class LogSoftmaxWrapper(nn.Module):
 
     def forward(self, x):
         return F.log_softmax(self.backbone(x), dim=1)
+
+
+_CHENYAFO_MODEL_NAMES = {
+    ("cifar10", "resnet20"): "cifar10_resnet20",
+    ("cifar10", "resnet56"): "cifar10_resnet56",
+    ("cifar10", "vgg16"): "cifar10_vgg16_bn",
+    ("cifar10", "vgg19"): "cifar10_vgg19_bn",
+    ("cifar10", "mobilenet_v2"): "cifar10_mobilenetv2_x1_0",
+    ("cifar100", "resnet20"): "cifar100_resnet20",
+    ("cifar100", "resnet56"): "cifar100_resnet56",
+    ("cifar100", "vgg16"): "cifar100_vgg16_bn",
+    ("cifar100", "vgg19"): "cifar100_vgg19_bn",
+    ("cifar100", "mobilenet_v2"): "cifar100_mobilenetv2_x1_0",
+}
+
+
+def _load_chenyaofo_cifar_model(args):
+    hub_name = _CHENYAFO_MODEL_NAMES.get((args.dataset, args.model))
+    if hub_name is None:
+        supported = ", ".join(f"{dataset}/{model}" for dataset, model in sorted(_CHENYAFO_MODEL_NAMES))
+        raise ValueError(
+            f"chenyaofo CIFAR pretrained model is not available for {args.dataset}/{args.model}. "
+            f"Supported pairs: {supported}."
+        )
+
+    repo = getattr(args, "cifar_pretrained_repo", "chenyaofo/pytorch-cifar-models")
+    print(f"[Pretrain] Loading CIFAR pretrained model from torch.hub: {repo}:{hub_name}")
+    model = torch.hub.load(repo, hub_name, pretrained=True, trust_repo=True)
+    args.cifar_pretrained_loaded = True
+    args.pretrained_loaded = True
+    return LogSoftmaxWrapper(model)
 
 
 def _dataset_num_classes(dataset_name):
@@ -25,6 +57,9 @@ def _dataset_num_classes(dataset_name):
     if dataset_name == "imagenet":
         return 1000
     raise ValueError(f"Unsupported dataset: {dataset_name}")
+
+def get_dataset_num_classes(dataset_name):
+    return _dataset_num_classes(dataset_name)
 
 def load_dataset(args, kwargs):
     if args.dataset == "mnist":
@@ -45,7 +80,15 @@ def load_dataset(args, kwargs):
 
 def load_model(args, kwargs):
     num_classes = _dataset_num_classes(args.dataset)
+    args.num_classes = num_classes
     args.torch_pretrained_loaded = False
+    args.cifar_pretrained_loaded = False
+    args.pretrained_loaded = False
+
+    if getattr(args, "cifar_pretrained", False):
+        if args.dataset not in {"cifar10", "cifar100"}:
+            raise ValueError("--cifar-pretrained can only be used with cifar10/cifar100.")
+        return _load_chenyaofo_cifar_model(args)
 
     if args.model == "lenet":
         return LeNet()
@@ -53,28 +96,41 @@ def load_model(args, kwargs):
         return AlexNet()
     elif args.model == "resnet20":
         return ResNet20(num_classes=num_classes)
+    elif args.model == "resnet56":
+        return ResNet56(num_classes=num_classes)
     elif args.model == "resnet18":
         weights = models.ResNet18_Weights.DEFAULT
         model = models.resnet18(weights=weights)
         args.torch_pretrained_loaded = weights is not None
+        args.pretrained_loaded = args.torch_pretrained_loaded
         model.fc = nn.Linear(model.fc.in_features, num_classes)
         return model if args.dataset == "imagenet" else LogSoftmaxWrapper(model)
     elif args.model == "vgg19":
         weights = models.VGG19_Weights.DEFAULT
         model = models.vgg19(weights=weights)
         args.torch_pretrained_loaded = weights is not None
+        args.pretrained_loaded = args.torch_pretrained_loaded
+        model.classifier[6] = nn.Linear(model.classifier[6].in_features, num_classes)
+        return model if args.dataset == "imagenet" else LogSoftmaxWrapper(model)
+    elif args.model == "vgg16":
+        weights = models.VGG16_Weights.DEFAULT
+        model = models.vgg16(weights=weights)
+        args.torch_pretrained_loaded = weights is not None
+        args.pretrained_loaded = args.torch_pretrained_loaded
         model.classifier[6] = nn.Linear(model.classifier[6].in_features, num_classes)
         return model if args.dataset == "imagenet" else LogSoftmaxWrapper(model)
     elif args.model == "mobilenet_v2":
         weights = models.MobileNet_V2_Weights.DEFAULT
         model = models.mobilenet_v2(weights=weights)
         args.torch_pretrained_loaded = weights is not None
+        args.pretrained_loaded = args.torch_pretrained_loaded
         model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
         return model if args.dataset == "imagenet" else LogSoftmaxWrapper(model)
     elif args.model == "resnet50":
         weights = models.ResNet50_Weights.DEFAULT
         model = models.resnet50(weights=weights)
         args.torch_pretrained_loaded = weights is not None
+        args.pretrained_loaded = args.torch_pretrained_loaded
         if num_classes != 1000:
             model.fc = nn.Linear(model.fc.in_features, num_classes)
         return model if args.dataset == "imagenet" else LogSoftmaxWrapper(model)
@@ -82,5 +138,25 @@ def load_model(args, kwargs):
         raise ValueError(f"Unsupported model: {args.model}")
     
 def load_optimizer(args, kwargs):
-    # 현재는 PruneAdam만 지원하지만, 향후 다른 옵티마이저도 추가할 수 있도록 함수로 분리
-    return PruneAdam
+    optimizer_name = getattr(args, "optimizer", "adam")
+    if optimizer_name == "adam":
+        def build_adam(named_parameters, lr, eps):
+            return PruneAdam(
+                named_parameters,
+                lr=lr,
+                eps=eps,
+                weight_decay=float(getattr(args, "weight_decay", 0.0)),
+            )
+        return build_adam
+    if optimizer_name == "sgd":
+        def build_sgd(named_parameters, lr, eps=None):
+            return PruneSGD(
+                named_parameters,
+                lr=lr,
+                momentum=float(getattr(args, "momentum", 0.0)),
+                dampening=float(getattr(args, "dampening", 0.0)),
+                weight_decay=float(getattr(args, "weight_decay", 0.0)),
+                nesterov=bool(getattr(args, "nesterov", False)),
+            )
+        return build_sgd
+    raise ValueError(f"Unsupported optimizer: {optimizer_name}")

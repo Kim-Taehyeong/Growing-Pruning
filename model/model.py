@@ -87,17 +87,17 @@ class ResNet20BasicBlock(nn.Module):
         return out
 
 
-class ResNet20(nn.Module):
-    def __init__(self, num_classes=10):
+class CifarResNet(nn.Module):
+    def __init__(self, blocks_per_stage, num_classes=10):
         super().__init__()
         self.in_planes = 16
 
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(16)
 
-        self.layer1 = self._make_layer(16, blocks=3, stride=1)
-        self.layer2 = self._make_layer(32, blocks=3, stride=2)
-        self.layer3 = self._make_layer(64, blocks=3, stride=2)
+        self.layer1 = self._make_layer(16, blocks=blocks_per_stage, stride=1)
+        self.layer2 = self._make_layer(32, blocks=blocks_per_stage, stride=2)
+        self.layer3 = self._make_layer(64, blocks=blocks_per_stage, stride=2)
 
         self.fc = nn.Linear(64, num_classes)
 
@@ -117,3 +117,13 @@ class ResNet20(nn.Module):
         out = out.view(out.size(0), -1)
         out = self.fc(out)
         return F.log_softmax(out, dim=1)
+
+
+class ResNet20(CifarResNet):
+    def __init__(self, num_classes=10):
+        super().__init__(blocks_per_stage=3, num_classes=num_classes)
+
+
+class ResNet56(CifarResNet):
+    def __init__(self, num_classes=10):
+        super().__init__(blocks_per_stage=9, num_classes=num_classes)

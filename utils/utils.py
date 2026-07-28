@@ -309,27 +309,51 @@ def print_convergence(model, X, Z):
 
 def print_prune(model, args):
     prune_param, total_param = 0, 0
-    json_dict = {}
+    layer_summary = {}
     for name, param in model.named_parameters():
         if param.dim() < 2:
             continue
         if name.split('.')[-1] == "weight":
-            json_dict[name] = {
-                "percentage" : 100 * (abs(param) == 0).sum().item() / param.numel(),
-                "nonzero parameters" : "{} / {}".format((param != 0).sum().item(), param.numel())
+            nonzero = int((param != 0).sum().item())
+            total = int(param.numel())
+            zero = total - nonzero
+            sparsity_percent = 100.0 * zero / total if total else 0.0
+            density_percent = 100.0 * nonzero / total if total else 0.0
+            layer_summary[name] = {
+                "sparsity_percent": sparsity_percent,
+                "density_percent": density_percent,
+                "nonzero_params": nonzero,
+                "total_params": total,
             }
             print("[at weight {}]".format(name))
-            print("percentage of pruned: {:.4f}%".format(100 * (abs(param) == 0).sum().item() / param.numel()))
-            print("nonzero parameters after pruning: {} / {}\n".format((param != 0).sum().item(), param.numel()))
+            print("sparsity: {:.4f}%".format(sparsity_percent))
+            print("density: {:.4f}%".format(density_percent))
+            print("nonzero parameters after pruning: {} / {}\n".format(nonzero, total))
         total_param += param.numel()
         prune_param += (param != 0).sum().item()
-    json_dict["total"] = {
-        "percentage" : 100 * (total_param - prune_param) / total_param,
-        "nonzero parameters" : "{} / {}".format(prune_param, total_param)
-    }
+    total_sparsity_percent = 100 * (total_param - prune_param) / total_param if total_param else 0.0
+    total_density_percent = 100 * prune_param / total_param if total_param else 0.0
     print("total nonzero parameters after pruning: {} / {} ({:.4f}%)".
           format(prune_param, total_param,
-                 100 * (total_param - prune_param) / total_param))
+                 total_sparsity_percent))
+
+    json_dict = _common_metric_fields(
+        args,
+        model,
+        optimizer=None,
+        stage=getattr(args, "_prune_summary_stage", "sparsity-summary"),
+        epoch=getattr(args, "_prune_summary_epoch", -1),
+    )
+    json_dict.update({
+        "loss": None,
+        "gflops": None,
+        "layer_sparsity": layer_summary,
+        "weight_sparsity_percent": total_sparsity_percent,
+        "weight_density_percent": total_density_percent,
+        "weight_nonzero_params": int(prune_param),
+        "weight_total_params": int(total_param),
+        "args": _safe_args_dict(args),
+    })
     
     with open(args.output_dir, 'a') as f:
         json.dump(json_dict, f)
@@ -460,6 +484,78 @@ def _safe_args_dict(args):
         safe[key] = _to_json_serializable(value)
     return safe
 
+def _method_name(args):
+    return getattr(args, "method", None) or ("gpadmm_full" if getattr(args, "use_rigl_admm", False) else "admm")
+
+
+def _target_sparsity(args):
+    if getattr(args, "use_rigl_admm", False):
+        return float(getattr(args, "sparsity", 0.0))
+    percent = getattr(args, "percent", None)
+    if isinstance(percent, (list, tuple)) and percent:
+        return float(np.mean([float(p) for p in percent]))
+    if isinstance(percent, (int, float)):
+        return float(percent)
+    return float(getattr(args, "sparsity", 0.0))
+
+
+def _num_classes(args):
+    if hasattr(args, "num_classes"):
+        return int(args.num_classes)
+    if args.dataset in ("mnist", "cifar10"):
+        return 10
+    if args.dataset == "cifar100":
+        return 100
+    if args.dataset == "imagenet":
+        return 1000
+    return None
+
+
+def _parameter_counts(model):
+    total_params = sum(p.numel() for p in model.parameters())
+    nonzero_params = sum(int(torch.count_nonzero(p).item()) for p in model.parameters())
+    measured_sparsity = 1.0 - (float(nonzero_params) / float(total_params)) if total_params else 0.0
+    return total_params, nonzero_params, measured_sparsity
+
+
+def _common_metric_fields(args, model, optimizer=None, stage=None, epoch=None):
+    total_params, nonzero_params, measured_sparsity = _parameter_counts(model)
+    current_lr = None
+    if optimizer is not None:
+        current_lr = optimizer.param_groups[0]["lr"]
+
+    return {
+        "method": _method_name(args),
+        "dataset": args.dataset,
+        "model": args.model,
+        "seed": int(getattr(args, "seed", 0)),
+        "device": getattr(args, "resolved_device", getattr(args, "device", "")),
+        "target_sparsity": _target_sparsity(args),
+        "measured_sparsity": measured_sparsity,
+        "total_params_M": total_params / 1e6,
+        "nonzero_params_M": nonzero_params / 1e6,
+        "top1_acc": None,
+        "top5_acc": None,
+        "stage": stage if stage is not None else getattr(args, "_extra_metrics", {}).get("stage", ""),
+        "epoch": epoch if epoch is not None else -1,
+        "lr": current_lr,
+        "optimizer": getattr(args, "optimizer", "adam"),
+        "rho": float(getattr(args, "rho", 0.0)),
+        "momentum": float(getattr(args, "momentum", 0.0)),
+        "weight_decay": float(getattr(args, "weight_decay", 0.0)),
+        "nesterov": bool(getattr(args, "nesterov", False)),
+        "num_cycles": int(getattr(args, "num_cycles", 0)),
+        "grow_interval": int(getattr(args, "grow_interval", 0)),
+        "gpadmm_prune_scope": getattr(args, "gpadmm_prune_scope", ""),
+        "sparsity_method": getattr(args, "sparsity_method", ""),
+        "c": float(getattr(args, "c", 0.0)),
+        "num_re_epochs": int(getattr(args, "num_re_epochs", 0)),
+        "checkpoint_loaded": bool(getattr(args, "checkpoint_loaded", False)),
+        "checkpoint_path": getattr(args, "checkpoint_path", ""),
+        "pretrained_loaded": bool(getattr(args, "pretrained_loaded", False)),
+        "num_classes": _num_classes(args),
+    }
+
 def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=None):
     """
     모델을 테스트하고 성능 지표를 계산하여 JSON 파일에 저장하는 함수.
@@ -481,10 +577,7 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=
     flops = _count_sparse_flops(model, sample_input)
     gflops = flops / 1e9  # GFLOPs 단위로 변환
 
-    # 전체 파라미터 수 계산
-    total_params = sum(p.numel() for p in model.parameters())
-    # 0이 아닌 가중치(pruning된 모델 고려)의 파라미터 수 계산
-    nonzero_params = sum(torch.count_nonzero(p) for p in model.parameters() if p.requires_grad)
+    total_params, nonzero_params, measured_sparsity = _parameter_counts(model)
     # --- 계산 종료 ---
 
     with torch.no_grad():
@@ -537,9 +630,7 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=
         recall = float(np.mean(r_list)) if r_list else 0.0
         f1 = float(np.mean(f1_list)) if f1_list else 0.0
 
-    current_lr = None
-    if optimizer is not None:
-        current_lr = optimizer.param_groups[0]['lr']
+    current_lr = optimizer.param_groups[0]['lr'] if optimizer is not None else None
 
     # === JSON 저장 ===
     metrics = {
@@ -552,16 +643,31 @@ def testAndSave(args, model, device, test_loader, prefix, epoch=None, optimizer=
         "recall": recall,
         "f1": f1,
         "total_params_M": total_params / 1e6,
-        "nonzero_params_M": nonzero_params.item() / 1e6,
+        "nonzero_params_M": nonzero_params / 1e6,
+        "measured_sparsity": measured_sparsity,
         "gflops": gflops,
         "lr": current_lr,
         "args": _safe_args_dict(args)
     }
+    metrics.update(_common_metric_fields(args, model, optimizer=optimizer, epoch=metrics["epoch"]))
+    metrics.update({
+        "prefix": prefix,
+        "loss": test_loss,
+        "top1_acc": acc1,
+        "top5_acc": acc5,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "gflops": gflops,
+        "args": _safe_args_dict(args),
+    })
 
     extra_metrics = getattr(args, "_extra_metrics", None)
     if isinstance(extra_metrics, dict) and extra_metrics:
         metrics.update(extra_metrics)
         args._extra_metrics = {}
+    if not metrics.get("stage"):
+        metrics["stage"] = prefix.lower().replace(" ", "-")
 
     json_file = Path(args.output_dir)
     with open(json_file, mode="a", encoding="utf-8") as f:

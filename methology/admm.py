@@ -59,6 +59,12 @@ def _prepare_admm_percent(args, model):
     else:
         percents = []
 
+    if getattr(args, "sparsity_was_set", False):
+        target = min(0.9999, max(0.0, float(getattr(args, "sparsity", 0.9))))
+        args.percent = [0.0] + [target] * max(n_layers - 1, 0)
+        print(f"[ADMM] Using --sparsity={target:.4f} for ADMM percent list (layers={n_layers})")
+        return
+
     # 사용자 지정이 없거나 기본값이면 모델 템플릿 우선 적용
     use_template = (not percents) or (list(percents) == _DEFAULT_PERCENT)
     template = _model_percent_template(getattr(args, "model", "")) if use_template else None

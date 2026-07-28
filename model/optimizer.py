@@ -327,6 +327,77 @@ class PruneAdam(NameOptimizer):
 
         return loss
 
+
+class PruneSGD(NameOptimizer):
+    def __init__(self, params, lr=1e-3, momentum=0.0, dampening=0.0,
+                 weight_decay=0.0, nesterov=False, eps=None):
+        if lr < 0.0:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        if momentum < 0.0:
+            raise ValueError("Invalid momentum value: {}".format(momentum))
+        if weight_decay < 0.0:
+            raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
+        if nesterov and (momentum <= 0.0 or dampening != 0.0):
+            raise ValueError("Nesterov momentum requires momentum > 0 and dampening == 0")
+        defaults = dict(
+            lr=lr,
+            momentum=momentum,
+            dampening=dampening,
+            weight_decay=weight_decay,
+            nesterov=nesterov,
+        )
+        super(PruneSGD, self).__init__(params, defaults)
+
+    def step(self, closure=None):
+        return self._step_impl(mask=None, closure=closure)
+
+    def prune_step(self, mask, closure=None):
+        return self._step_impl(mask=mask, closure=closure)
+
+    def _step_impl(self, mask=None, closure=None):
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+            weight_decay = group['weight_decay']
+            momentum = group['momentum']
+            dampening = group['dampening']
+            nesterov = group['nesterov']
+
+            for name, p in group['params']:
+                if p.grad is None:
+                    continue
+                d_p = p.grad.data
+                if d_p.is_sparse:
+                    raise RuntimeError('SGD does not support sparse gradients in this optimizer')
+
+                if weight_decay != 0:
+                    d_p = d_p.add(p.data, alpha=weight_decay)
+
+                if momentum != 0:
+                    state = self.state[p]
+                    buf = state.get('momentum_buffer')
+                    if buf is None:
+                        buf = torch.clone(d_p).detach()
+                        state['momentum_buffer'] = buf
+                    else:
+                        buf.mul_(momentum).add_(d_p, alpha=1.0 - dampening)
+                    if nesterov:
+                        d_p = d_p.add(buf, alpha=momentum)
+                    else:
+                        d_p = buf
+
+                if mask is not None and name in mask:
+                    weight_mask = mask[name].to(p.device)
+                    d_p = d_p * weight_mask
+                    if momentum != 0 and 'momentum_buffer' in self.state[p]:
+                        self.state[p]['momentum_buffer'].mul_(weight_mask)
+
+                p.data.add_(d_p, alpha=-group['lr'])
+
+        return loss
+
     def prune_step(self, mask, closure=None):
         """Performs a single optimization step.
 
