@@ -22,7 +22,6 @@ common:
 gpadmm:
   gpadmm_prune_scope: global
   sparsity: 0.95
-  sparsity_method: uniform
   num_cycles: 2
   grow_interval: 2
   num_re_epochs: 1

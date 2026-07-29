@@ -1,0 +1,30 @@
+method: gpadmm_full
+
+common:
+  dataset: imagenet
+  model: resnet50
+  seed: 1
+  batch_size: 128
+  test_batch_size: 256
+  data_dir: ~/imagenet
+  output_dir: ./output/gpadmm_imagenet_resnet50.jsonl
+  save_dir: ./runs/gpadmm_imagenet_resnet50
+
+  # torchvision pretrained 사용 -> 사전학습 단계 생략
+  num_pre_epochs: 0
+
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0001
+  nesterov: true
+  rho: 0.01
+
+gpadmm:
+  gpadmm_prune_scope: global
+  sparsity: 0.9
+  num_cycles: 3
+  grow_interval: 5
+  num_re_epochs: 3
+  c: 0.5
+  min_layer_keep_ratio: 0.01
