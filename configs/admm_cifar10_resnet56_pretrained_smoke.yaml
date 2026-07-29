@@ -9,7 +9,7 @@ common:
   device: auto
   batch_size: 64
   test_batch_size: 128
-  data_dir: ./data
+  data_dir: ~/imagenet
   output_dir: ./output/admm_cifar10_resnet56_pretrained_smoke.jsonl
   save_dir: ./runs/admm_cifar10_resnet56_pretrained_smoke
   optimizer: adam
