@@ -147,11 +147,14 @@ def _train_admm(args, model, device, train_loader, test_loader, optimizer, total
         print('Epoch: {}'.format(epoch + 1))
         running_loss = 0.0
         num_batches = max(len(train_loader), 1)
+        # Z/U는 에폭 중 값이 고정이므로 GPU로 한 번만 올려 재사용한다.
+        Z_dev = tuple(z.to(device) for z in Z)
+        U_dev = tuple(u.to(device) for u in U)
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
             output = model(data)
-            loss = admm_loss(args, device, model, Z, U, output, target)
+            loss = admm_loss(args, device, model, Z_dev, U_dev, output, target)
             running_loss += loss.item()
             loss.backward()
             optimizer.step()

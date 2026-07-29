@@ -388,7 +388,7 @@ def main():
     if use_cuda and num_workers > 0:
         # 워커 재생성 비용과 대기 시간을 줄여 GPU가 굶지 않도록 함
         kwargs['persistent_workers'] = True
-        kwargs['prefetch_factor'] = 4
+        kwargs['prefetch_factor'] = 2
     if use_cuda:
         torch.backends.cudnn.benchmark = True
 

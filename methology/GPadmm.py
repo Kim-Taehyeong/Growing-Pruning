@@ -170,6 +170,10 @@ def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, opt
         model.train()
         running_loss = 0.0
         num_batches = max(len(train_loader), 1)
+        # Z/U는 에폭 중 값이 고정이므로 GPU로 한 번만 올려 재사용한다.
+        # (배치마다 올리면 ResNet-50 기준 배치당 200MB를 반복 전송하게 됨)
+        Z_dev = tuple(z.to(device) for z in Z)
+        U_dev = tuple(u.to(device) for u in U)
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
@@ -182,7 +186,7 @@ def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, opt
             task_loss.backward()
             online_accumulate_grad_ema(model, grad_buffers, beta=0.95)
 
-            penalty_loss = admm_penalty_loss(args, device, model, Z, U)
+            penalty_loss = admm_penalty_loss(args, device, model, Z_dev, U_dev)
             penalty_loss.backward()
 
             mask_grads(model, masks)
