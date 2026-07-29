@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
     "save_dir": "./runs",
     "run_name": "",
     "data_dir": "./data",
+    "num_workers": 8,
     "save_checkpoint_every": 1,
     "eta_update_interval": 1.0,
     "dense_checkpoint": "",
@@ -382,7 +383,14 @@ def main():
     torch.manual_seed(args.seed)
     device = _resolve_device(args)
     use_cuda = device.type == "cuda"
-    kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
+    num_workers = int(getattr(args, "num_workers", 8))
+    kwargs = {'num_workers': num_workers, 'pin_memory': True} if use_cuda else {}
+    if use_cuda and num_workers > 0:
+        # 워커 재생성 비용과 대기 시간을 줄여 GPU가 굶지 않도록 함
+        kwargs['persistent_workers'] = True
+        kwargs['prefetch_factor'] = 4
+    if use_cuda:
+        torch.backends.cudnn.benchmark = True
 
     # 실험 로그/체크포인트 저장 경로 초기화
     setup_experiment(args)
