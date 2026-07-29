@@ -2,7 +2,7 @@ method: gpadmm_full
 
 common:
   dataset: cifar10
-  model: vgg16
+  model: resnet56
   cifar_pretrained: true
   min_dense_acc: 20.0
   seed: 1
@@ -10,8 +10,8 @@ common:
   batch_size: 256
   test_batch_size: 512
   data_dir: ~/imagenet
-  output_dir: ./output/gpadmm_cifar10_vgg16_pretrained_global_sgd_c0.3.jsonl
-  save_dir: ./runs/gpadmm_cifar10_vgg16_pretrained_global_sgd_c0.3
+  output_dir: ./output/gpadmm_cifar10_resnet56_pretrained_global_sgd_c0.3.jsonl
+  save_dir: ./runs/gpadmm_cifar10_resnet56_pretrained_global_sgd_c0.3
   optimizer: sgd
   lr: 0.01
   momentum: 0.9
