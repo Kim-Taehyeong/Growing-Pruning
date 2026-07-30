@@ -36,7 +36,7 @@ for sparsity in sparsity_list:
     cycle_list = range(1, 10, 1)
 
     for cycle in cycle_list:
-        experiment_name = f"gpadmm_cifar10_{model}_pretrained_global_sgd_cycle_{cycle}"
+        experiment_name = f"gpadmm_cifar10_{sparsity}_{model}_pretrained_global_sgd_cycle_{cycle}"
         config["gpadmm"]["num_cycles"] = cycle
         config["common"]["save_dir"] = f"./runs/{experiment_name}"
         config["common"]["output_dir"] = f"./output/{experiment_name}.jsonl"
@@ -46,7 +46,7 @@ for sparsity in sparsity_list:
     # Step 2 : grow interval
     interval_list = range(3, 10, 1)
     for interval in interval_list:
-        experiment_name = f"gpadmm_cifar10_{model}_pretrained_global_sgd_interval_{interval}"
+        experiment_name = f"gpadmm_cifar10_{sparsity}_{model}_pretrained_global_sgd_interval_{interval}"
         config["gpadmm"]["grow_interval"] = interval
         config["common"]["save_dir"] = f"./runs/{experiment_name}"
         config["common"]["output_dir"] = f"./output/{experiment_name}.jsonl"
@@ -55,7 +55,7 @@ for sparsity in sparsity_list:
     # Step 3 : re epoch
     re_epoch_list = range(3, 10, 1)
     for re_epoch in re_epoch_list:
-        experiment_name = f"gpadmm_cifar10_{model}_pretrained_global_re_epoch_{re_epoch}"
+        experiment_name = f"gpadmm_cifar10_{sparsity}_{model}_pretrained_global_re_epoch_{re_epoch}"
         config["gpadmm"]["num_re_epochs"] = re_epoch
         config["common"]["save_dir"] = f"./runs/{experiment_name}"
         config["common"]["output_dir"] = f"./output/{experiment_name}.jsonl"
@@ -65,7 +65,7 @@ for sparsity in sparsity_list:
     # Step 4 : learning rate
     lr_list = [0.1, 0.05, 0.01, 0.005, 0.001]
     for lr in lr_list:
-        experiment_name = f"gpadmm_cifar10_{model}_pretrained_global_lr_{lr}"
+        experiment_name = f"gpadmm_cifar10_{sparsity}_{model}_pretrained_global_lr_{lr}"
         config["common"]["save_dir"] = f"./runs/{experiment_name}"
         config["common"]["output_dir"] = f"./output/{experiment_name}.jsonl"
         config["common"]["lr"] = lr
@@ -73,7 +73,7 @@ for sparsity in sparsity_list:
         
     min_layer_ratio = [0.01, 0.05, 0.1, 0.2, 0.3]
     for ratio in min_layer_ratio:
-        experiment_name = f"gpadmm_cifar10_{model}_pretrained_global_min_layer_ratio_{ratio}"
+        experiment_name = f"gpadmm_cifar10_{sparsity}_{model}_pretrained_global_min_layer_ratio_{ratio}"
         config["common"]["save_dir"] = f"./runs/{experiment_name}"
         config["common"]["output_dir"] = f"./output/{experiment_name}.jsonl"
         config["gpadmm"]["min_layer_ratio"] = ratio

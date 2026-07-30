@@ -57,12 +57,11 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
     # LR 스케줄러 설정
     optimizer = base_optimizer_cls(model.named_parameters(), lr=args.lr, eps=args.adam_epsilon)
 
-    # 코사인 감쇠로 1차(Main-Pruning), 2차(Retraining) 스케줄러 설정
-    main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_cycles)
-    retrain_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_re_epochs)
-
-    # 두 스케줄러를 사이클 단위로 순차적으로 적용하는 SequentialLR 설정
-    combined_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[main_scheduler, retrain_scheduler], milestones=[args.num_cycles])
+    # 프루닝 구간 스케줄러: 사이클 수가 아니라 총 프루닝 에폭 수를 T_max로 잡고
+    # 에폭 단위로 step한다. 이렇게 하면 num_cycles x grow_interval이 같은 설정끼리
+    # LR 궤적이 완전히 동일해져서 num_cycles ablation에 LR 교란이 섞이지 않는다.
+    prune_epochs = max(args.num_cycles * args.grow_interval, 1)
+    prune_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=prune_epochs)
 
     # 사이클 단위로 저장할 Gradient Buffer 초기화
     Z, _ = initialize_Z_and_U(model)
@@ -100,18 +99,25 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
         masks, Z = _admm_prune_stage(args, model, device, train_loader, test_loader, masks,
                                  optimizer, epochs=args.grow_interval, cycle=c + 1,
                                  grad_buffers=grad_buf, Z_input=Z,
-                                 total_epochs=total_epochs, global_epoch=global_epoch)
+                                 total_epochs=total_epochs, global_epoch=global_epoch,
+                                 scheduler=prune_scheduler)
         global_epoch += args.grow_interval
         if c < args.num_cycles - 1:
             current_retained_ratio *= (1.0 + beta)
             masks = rigl_grow_once_global(model, masks, global_grow_frac=beta, grad_buffers=grad_buf)
         grad_buf = {}
-        combined_scheduler.step()
-    
+
     args.global_target_sparsity = float(getattr(args, "sparsity", 0.0))
     if _use_layerwise_pruning(args):
         args.percent = list(args.gpadmm_final_percent)
     print('[RigL+ADMM] Final fixed-mask retraining...')
+
+    # 최종 프루닝 직후가 충격이 가장 크므로 LR을 기본값으로 되감아 회복 여력을 준다.
+    # (Renda et al., ICLR 2020: LR rewinding > low-LR fine-tuning)
+    for group in optimizer.param_groups:
+        group['lr'] = args.lr
+    retrain_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(args.num_re_epochs, 1))
 
     # (4) 최종 재학습(마스크 고정, 성장/프루닝 없음)
     for epoch in range(args.num_re_epochs):
@@ -149,7 +155,7 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
             "eta_sec": eta,
             "stage": "retraining",
         }
-        combined_scheduler.step()
+        retrain_scheduler.step()
         metrics = testAndSave(args, model, device, test_loader, "ADMM-Re-Training", epoch, optimizer=optimizer)
         if epoch == args.num_re_epochs - 1:
             save_checkpoint(args, model, optimizer, stage="gpadmm_retrain_final", stage_epoch=epoch + 1,
@@ -161,7 +167,7 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
 
 
 def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, optimizer, epochs, cycle,
-                      grad_buffers, Z_input, total_epochs, global_epoch):
+                      grad_buffers, Z_input, total_epochs, global_epoch, scheduler=None):
     Z = Z_input
     _, U = initialize_Z_and_U(model)
 
@@ -219,6 +225,8 @@ def _admm_prune_stage(args, model, device, train_loader, test_loader, masks, opt
             "stage": f"cycle-{cycle}-admm",
         }
         metrics = testAndSave(args, model, device, test_loader, f"ADMM-Cycle {cycle}", epoch, optimizer=optimizer)
+        if scheduler is not None:
+            scheduler.step()
 
     # 목표 희소도까지 프루닝
     if _use_layerwise_pruning(args):
