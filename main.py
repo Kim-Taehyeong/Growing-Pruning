@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     "num_epochs": 10,
     "num_re_epochs": 3,
     "lr": 1e-3,
+    # When omitted, fixed-mask retraining starts from the main training LR.
+    "retrain_lr": None,
     "optimizer": "adam",
     "adam_epsilon": 1e-8,
     "momentum": 0.0,
@@ -250,6 +252,10 @@ def _validate_args(args):
         raise ValueError(f"Unsupported gpadmm_prune_scope: {args.gpadmm_prune_scope}")
     if args.optimizer not in OPTIMIZER_CHOICES:
         raise ValueError(f"Unsupported optimizer: {args.optimizer}")
+    if args.retrain_lr is not None:
+        args.retrain_lr = float(args.retrain_lr)
+        if args.retrain_lr <= 0.0:
+            raise ValueError("retrain_lr must be greater than zero when specified")
     if not isinstance(args.percent, (list, tuple)):
         args.percent = [float(args.percent)]
     args.percent = [float(value) for value in args.percent]

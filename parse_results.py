@@ -28,6 +28,7 @@ SUMMARY_COLUMNS = [
     "epoch",
     "optimizer",
     "lr",
+    "retrain_lr",
     "rho",
     "c",
     "num_cycles",
@@ -220,6 +221,10 @@ def build_summary_row(final_record, dense_record, output_file, unstable_flag):
     row["nonzero_params_M"] = final_record.get("nonzero_params_M", "")
     row["gflops"] = final_record.get("gflops", "")
     row["lr"] = record_args.get("lr", get_value(final_record, "lr", ""))
+    row["retrain_lr"] = record_args.get(
+        "retrain_lr",
+        get_value(final_record, "retrain_lr", row["lr"]),
+    )
     row["rho"] = get_value(final_record, "rho", "")
     row["c"] = get_value(final_record, "c", "")
     row["num_cycles"] = get_value(final_record, "num_cycles", "")

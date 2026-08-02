@@ -112,10 +112,16 @@ def _rigl_admm_cycle_train_global(args, model, device, train_loader, test_loader
         args.percent = list(args.gpadmm_final_percent)
     print('[RigL+ADMM] Final fixed-mask retraining...')
 
-    # 최종 프루닝 직후가 충격이 가장 크므로 LR을 기본값으로 되감아 회복 여력을 준다.
+    # 최종 프루닝 직후가 충격이 가장 크므로 retraining 전용 LR로
+    # 되감아 회복 여력을 준다. retrain_lr가 없으면 기존처럼 args.lr을 쓴다.
     # (Renda et al., ICLR 2020: LR rewinding > low-LR fine-tuning)
+    retrain_lr = getattr(args, "retrain_lr", None)
+    if retrain_lr is None:
+        retrain_lr = args.lr
+    retrain_lr = float(retrain_lr)
+    print(f'[RigL+ADMM] Retraining LR rewind: {retrain_lr}')
     for group in optimizer.param_groups:
-        group['lr'] = args.lr
+        group['lr'] = retrain_lr
     retrain_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(args.num_re_epochs, 1))
 

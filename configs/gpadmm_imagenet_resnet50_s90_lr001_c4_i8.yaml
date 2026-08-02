@@ -16,6 +16,7 @@ common:
 
   optimizer: sgd
   lr: 0.01
+  retrain_lr: 0.005
   momentum: 0.9
   weight_decay: 0.0001
   nesterov: true
@@ -26,6 +27,6 @@ gpadmm:
   sparsity: 0.9
   num_cycles: 4
   grow_interval: 8
-  num_re_epochs: 10
+  num_re_epochs: 15
   c: 0.8
-  min_layer_keep_ratio: 0.05
+  min_layer_keep_ratio: 0.01

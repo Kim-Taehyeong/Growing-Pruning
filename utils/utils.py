@@ -540,6 +540,11 @@ def _common_metric_fields(args, model, optimizer=None, stage=None, epoch=None):
         "epoch": epoch if epoch is not None else -1,
         "lr": current_lr,
         "optimizer": getattr(args, "optimizer", "adam"),
+        "retrain_lr": (
+            float(args.retrain_lr)
+            if getattr(args, "retrain_lr", None) is not None
+            else float(getattr(args, "lr", 0.0))
+        ),
         "rho": float(getattr(args, "rho", 0.0)),
         "momentum": float(getattr(args, "momentum", 0.0)),
         "weight_decay": float(getattr(args, "weight_decay", 0.0)),
