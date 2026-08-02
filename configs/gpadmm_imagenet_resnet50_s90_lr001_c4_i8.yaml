@@ -4,12 +4,12 @@ common:
   dataset: imagenet
   model: resnet50
   seed: 1
-  batch_size: 64
-  test_batch_size: 128
-  device: cuda:1
-  data_dir: /home/users/taehyeok/Growing-Pruning/data/imagenet-hf
-  output_dir: ./output/gpadmm_imagenet_resnet50.jsonl
-  save_dir: ./runs/gpadmm_imagenet_resnet50
+  batch_size: 128
+  device: "cuda:0"
+  test_batch_size: 256
+  data_dir: ~/imagenet
+  output_dir: ./output/gpadmm_imagenet_resnet50_s90_lr001_c4_i8.jsonl
+  save_dir: ./runs/gpadmm_imagenet_resnet50_s90_lr001_c4_i8
 
   # torchvision pretrained 사용 -> 사전학습 단계 생략
   num_pre_epochs: 0
@@ -24,8 +24,8 @@ common:
 gpadmm:
   gpadmm_prune_scope: global
   sparsity: 0.9
-  num_cycles: 3
-  grow_interval: 5
-  num_re_epochs: 3
-  c: 0.5
-  min_layer_keep_ratio: 0.01
+  num_cycles: 4
+  grow_interval: 8
+  num_re_epochs: 10
+  c: 0.8
+  min_layer_keep_ratio: 0.05
